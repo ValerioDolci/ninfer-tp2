@@ -10,6 +10,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <stdexcept>
 
 namespace ninfer::ops::detail {
 namespace {
@@ -167,8 +168,9 @@ void launch_nvfp4_w4a4_tma_linear_add(Nvfp4GeometryId problem, const std::uint8_
     case Nvfp4GeometryId::N14336K5120:
     case Nvfp4GeometryId::N16384K5120:
     case Nvfp4GeometryId::N34816K5120:
-        return;
+        break;
     }
+    throw std::logic_error("nvfp4 W4A4 TMA linear_add has no route for this geometry");
 }
 
 } // namespace ninfer::ops::detail
