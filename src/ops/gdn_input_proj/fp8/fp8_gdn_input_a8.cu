@@ -15,25 +15,23 @@
 namespace ninfer::ops::detail {
 namespace {
 
-using Geometry = Fp8N16384K5120;
 using Schedule = Fp8A8DefaultSchedule;
 
-static_assert((Fp8GdnInputOutput::kQkvRows % Schedule::kBlockRows) == 0);
-static_assert((Fp8GdnInputOutput::kZRows % Schedule::kBlockRows) == 0);
-
-template <bool FullTokens>
+template <class Geometry, class Output, bool FullTokens>
 void launch_mma(const Weight& weight, Tensor& qkv, Tensor& z, Fp8A8Workspace workspace,
                 std::int32_t tokens, cudaStream_t stream) {
+    static_assert(Geometry::kOutputRows == Output::kRows);
+    static_assert((Output::kQkvRows % Schedule::kBlockRows) == 0);
+    static_assert((Output::kZRows % Schedule::kBlockRows) == 0);
     constexpr int kRowTiles = Geometry::kOutputRows / Schedule::kBlockRows;
     const int token_tiles   = (tokens + Schedule::kBlockTokens - 1) / Schedule::kBlockTokens;
     const int blocks        = kRowTiles * token_tiles;
-    const Fp8GdnInputOutput output{static_cast<__nv_bfloat16*>(qkv.data),
-                                   static_cast<__nv_bfloat16*>(z.data)};
+    const Output output{static_cast<__nv_bfloat16*>(qkv.data), static_cast<__nv_bfloat16*>(z.data)};
 
     if constexpr (Schedule::kSharedBytes > 48 * 1024) {
         static FuncAttrPerDevice attribute;
         attribute.ensure(
-            fp8_mma_kernel<Geometry, Schedule, FullTokens, Fp8IdentityEpilogue, Fp8GdnInputOutput>,
+            fp8_mma_kernel<Geometry, Schedule, FullTokens, Fp8IdentityEpilogue, Output>,
             cudaFuncAttributeMaxDynamicSharedMemorySize, Schedule::kSharedBytes);
     }
     fp8_mma_kernel<Geometry, Schedule, FullTokens>
@@ -44,16 +42,27 @@ void launch_mma(const Weight& weight, Tensor& qkv, Tensor& z, Fp8A8Workspace wor
     CUDA_CHECK(cudaGetLastError());
 }
 
+template <class Geometry, class Output>
+void launch_a8(const Tensor& x, const Weight& weight, Tensor& qkv, Tensor& z,
+               Fp8A8Workspace workspace, cudaStream_t stream) {
+    launch_fp8_a8_quantize(x, weight, workspace, stream);
+    if ((x.ne[1] % Schedule::kBlockTokens) == 0) {
+        launch_mma<Geometry, Output, true>(weight, qkv, z, workspace, x.ne[1], stream);
+    } else {
+        launch_mma<Geometry, Output, false>(weight, qkv, z, workspace, x.ne[1], stream);
+    }
+}
+
 } // namespace
 
 void fp8_gdn_input_a8_launch(const Tensor& x, const Weight& weight, Tensor& qkv, Tensor& z,
                              Fp8A8Workspace workspace, cudaStream_t stream) {
-    launch_fp8_a8_quantize(x, weight, workspace, stream);
-    if ((x.ne[1] % Schedule::kBlockTokens) == 0) {
-        launch_mma<true>(weight, qkv, z, workspace, x.ne[1], stream);
-    } else {
-        launch_mma<false>(weight, qkv, z, workspace, x.ne[1], stream);
-    }
+    launch_a8<Fp8N16384K5120, Fp8GdnInputOutput>(x, weight, qkv, z, workspace, stream);
+}
+
+void fp8_gdn_input_shard_a8_launch(const Tensor& x, const Weight& weight, Tensor& qkv, Tensor& z,
+                                   Fp8A8Workspace workspace, cudaStream_t stream) {
+    launch_a8<Fp8N8192K5120, Fp8GdnInputShardOutput>(x, weight, qkv, z, workspace, stream);
 }
 
 } // namespace ninfer::ops::detail

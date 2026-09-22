@@ -8,12 +8,15 @@
 
 namespace ninfer::ops::detail {
 
-struct Fp8GdnInputOutput {
-    static constexpr std::int32_t kQueryRows = 2048;
-    static constexpr std::int32_t kKeyRows   = 2048;
-    static constexpr std::int32_t kValueRows = 6144;
+// Routes parent rows [0,Q+K+V) to qkv and the trailing Z rows to z. KeyRows is shared by the Q and
+// K sections and ValueRows by the V and Z sections.
+template <std::int32_t KeyRows, std::int32_t ValueRows>
+struct Fp8GdnInputSectionOutput {
+    static constexpr std::int32_t kQueryRows = KeyRows;
+    static constexpr std::int32_t kKeyRows   = KeyRows;
+    static constexpr std::int32_t kValueRows = ValueRows;
     static constexpr std::int32_t kQkvRows   = kQueryRows + kKeyRows + kValueRows;
-    static constexpr std::int32_t kZRows     = 6144;
+    static constexpr std::int32_t kZRows     = ValueRows;
     static constexpr std::int32_t kRows      = kQkvRows + kZRows;
 
     __nv_bfloat16* qkv;
@@ -38,8 +41,17 @@ struct Fp8GdnInputOutput {
     }
 };
 
+using Fp8GdnInputOutput = Fp8GdnInputSectionOutput<2048, 6144>;
+
+// Two-device shard: each rank's contiguous [8192,5120] parent holds its 8 of 16 key heads and 24
+// of 48 value heads in the same Q|K|V|Z order.
+using Fp8GdnInputShardOutput = Fp8GdnInputSectionOutput<1024, 3072>;
+
 static_assert(Fp8GdnInputOutput::kRows == 16384);
 static_assert((Fp8GdnInputOutput::kQkvRows % 128) == 0);
 static_assert((Fp8GdnInputOutput::kZRows % 128) == 0);
+static_assert(Fp8GdnInputShardOutput::kRows == 8192);
+static_assert((Fp8GdnInputShardOutput::kQkvRows % 128) == 0);
+static_assert((Fp8GdnInputShardOutput::kZRows % 128) == 0);
 
 } // namespace ninfer::ops::detail
