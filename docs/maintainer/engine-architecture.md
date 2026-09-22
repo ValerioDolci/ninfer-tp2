@@ -237,6 +237,13 @@ View 保留完整 parent 的几何、planes 和元素范围；原生准备按入
 共享对象只驻留一次，各使用位置保留独立的 Use。激活许可为 `A16Only={A16}`、
 `AllowA8={A16,A8}`、`AllowA4={A16,A8,A4}`；融合调用取相关 Use 的许可交集并处理所需辅助值。
 
+`LoadOptions.tp=2` 时 Dense Qwen3.5 在加载阶段按逻辑参数名切分（`qwen3_5/load/sharding.h`）：
+Attention 与 GDN 投影、MLP gate/up、`text/output_head` 按 head/中间宽度/词表分行，输出投影、
+MLP down、`mtp/input_projection` 与 GDN 卷积通道分列；norm 与 `text/token_embedding` 复制；
+Vision 只驻留在 `vision_rank`，DFlash 与 proposal 只驻留在设备 0。同一 parent 上的逻辑参数
+合成一个 parent 放置。Model 为每个设备保存一组视图，每个设备构造自己的 Parameters；
+MoE、以及读取整份 head 的设备 0 drafter（完整 proposal head）在 tp=2 下被拒绝。
+
 模型代码直接维护有限调用写法、跨 Op 融合和阶段关系；闭合计算及其 shape/格式分派属于 Op。
 Reader、binder、原生参数准备、容量查询、warmup 和实际执行各自检查所消费的合同。
 合法 artifact 的可执行范围取决于实际消费者，转换不要求完整权重组合预先注册。

@@ -70,6 +70,8 @@ struct MtpParameters {
     Tensor query_norm, key_norm;
     LinearParameters output;
     FfnParameters ffn;
+    // Empty on a tensor-parallel rank that does not hold the selected head: the optimized
+    // proposal head is PrimaryOnly, and its proposal runs on rank 0.
     LinearParameters output_head;
 };
 
@@ -130,15 +132,22 @@ struct ProposalParameters {
 // Cold native preparation for the fixed model implementation. This owner is stable before
 // startup sizing, execution, or Graph capture; all weight addresses borrow the source Model.
 // Shape-dependent kernel selection and scratch remain with the calling implementation and Op.
+//
+// A tensor-parallel Model has one Parameters per rank. Its operands are that rank's shards,
+// with head, intermediate and vocabulary extents divided by tp (load/sharding.h); Vision, draft
+// and proposal parameters exist only on the rank that holds them.
 class Parameters {
 public:
-    explicit Parameters(const Model& source);
+    explicit Parameters(const Model& source) : Parameters(source, 0) {}
+
+    Parameters(const Model& source, int device);
     Parameters(const Parameters&)            = delete;
     Parameters& operator=(const Parameters&) = delete;
     Parameters(Parameters&&)                 = delete;
     Parameters& operator=(Parameters&&)      = delete;
 
     const Model& model;
+    const int device;
     TextParameters text;
     std::optional<MtpParameters> mtp;
     std::optional<VisionParameters> vision;
