@@ -67,6 +67,12 @@ void fp8_linear_add_a8_launch(const Tensor& x, const Weight& weight, Tensor& res
     case Fp8GeometryId::N5120K17408:
         launch_problem<Fp8N5120K17408>(weight, residual, scratch, x.ne[1], stream);
         return;
+    case Fp8GeometryId::N5120K3072:
+        launch_problem<Fp8N5120K3072>(weight, residual, scratch, x.ne[1], stream);
+        return;
+    case Fp8GeometryId::N5120K8704:
+        launch_problem<Fp8N5120K8704>(weight, residual, scratch, x.ne[1], stream);
+        return;
     case Fp8GeometryId::N14336K5120:
     case Fp8GeometryId::N16384K5120:
     case Fp8GeometryId::N34816K5120:
@@ -75,8 +81,6 @@ void fp8_linear_add_a8_launch(const Tensor& x, const Weight& weight, Tensor& res
     case Fp8GeometryId::N8192K5120:
     case Fp8GeometryId::N17408K5120:
     case Fp8GeometryId::N124160K5120:
-    case Fp8GeometryId::N5120K3072:
-    case Fp8GeometryId::N5120K8704:
         break;
     }
     throw std::invalid_argument("fp8 linear_add: unsupported problem");

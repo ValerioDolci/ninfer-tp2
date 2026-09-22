@@ -51,7 +51,6 @@ __global__ __launch_bounds__(
                                                                           descriptors,
                                                                   float alpha,
                                                                   __nv_bfloat16* __restrict__ output) {
-    static_assert(Geometry::kOutputRows == 34816);
     static_assert(Geometry::kInputRows == 5120);
     static_assert((Geometry::kInputRows % Schedule::kBlockK) == 0);
     static_assert(Schedule::kBlockN == 128);

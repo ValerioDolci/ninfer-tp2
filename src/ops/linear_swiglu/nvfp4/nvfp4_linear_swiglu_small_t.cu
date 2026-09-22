@@ -11,15 +11,14 @@
 
 #include <array>
 #include <cstddef>
+#include <stdexcept>
 #include <utility>
 
 namespace ninfer::ops::detail {
 namespace {
 
-using Geometry              = Nvfp4N34816K5120;
-constexpr int kIntermediate = Geometry::kOutputRows / 2;
-
-template <int ActiveTokens, class Schedule>
+// Geometry is the gate/up problem: gate rows [0,M) precede their up rows [M,2M), M = N/2.
+template <class Geometry, int ActiveTokens, class Schedule>
 __global__ __launch_bounds__(
     Schedule::kThreads,
     Schedule::
@@ -36,6 +35,8 @@ __global__ __launch_bounds__(
     static_assert((Schedule::kWarpsPerCta % 4) == 0);
     static_assert((128 % Schedule::kWarpsPerCta) == 0);
 
+    constexpr int kIntermediate = Geometry::kOutputRows / 2;
+    static_assert((kIntermediate % 128) == 0);
     __shared__ Nvfp4SimtSharedStorage<Geometry, ActiveTokens, Schedule> shared;
     constexpr int kCtasPerM128                    = 128 / Schedule::kWarpsPerCta;
     const int block                               = static_cast<int>(blockIdx.x);
@@ -75,8 +76,9 @@ __global__ __launch_bounds__(
 
 using Launch = void (*)(const Tensor&, const Weight&, Tensor&, cudaStream_t);
 
-template <int ActiveTokens>
+template <class Geometry, int ActiveTokens>
 void launch_exact(const Tensor& x, const Weight& weight, Tensor& out, cudaStream_t stream) {
+    constexpr int kIntermediate             = Geometry::kOutputRows / 2;
     static constexpr auto kActivationAccess = ActiveTokens <= 4
                                                   ? Nvfp4SimtActivationAccess::SharedPhase
                                                   : Nvfp4SimtActivationAccess::TokenPacked;
@@ -87,7 +89,7 @@ void launch_exact(const Tensor& x, const Weight& weight, Tensor& out, cudaStream
     static_assert((kIntermediate % Schedule::kWarpsPerCta) == 0);
     constexpr int kBlocks = kIntermediate / Schedule::kWarpsPerCta;
     const float inverse   = 1.0F / weight.weight_scale_divisor;
-    nvfp4_linear_swiglu_small_t_kernel<ActiveTokens, Schedule>
+    nvfp4_linear_swiglu_small_t_kernel<Geometry, ActiveTokens, Schedule>
         <<<kBlocks, Schedule::kThreads, 0, stream>>>(
             static_cast<const __nv_bfloat16*>(x.data),
             static_cast<const std::uint8_t*>(weight.qdata),
@@ -96,19 +98,40 @@ void launch_exact(const Tensor& x, const Weight& weight, Tensor& out, cudaStream
     CUDA_CHECK(cudaGetLastError());
 }
 
-template <std::size_t... Offsets>
+template <class Geometry, std::size_t... Offsets>
 constexpr auto make_launchers(std::index_sequence<Offsets...>) {
-    return std::array<Launch, sizeof...(Offsets)>{&launch_exact<2 + static_cast<int>(Offsets)>...};
+    return std::array<Launch, sizeof...(Offsets)>{
+        &launch_exact<Geometry, 2 + static_cast<int>(Offsets)>...};
 }
 
-constexpr auto kLaunchers = make_launchers(std::make_index_sequence<16 - 2 + 1>{});
+template <class Geometry>
+constexpr auto make_launchers() {
+    return make_launchers<Geometry>(std::make_index_sequence<16 - 2 + 1>{});
+}
+
+constexpr auto kGateUp34816Launchers = make_launchers<Nvfp4N34816K5120>();
+constexpr auto kGateUp17408Launchers = make_launchers<Nvfp4N17408K5120>();
 
 } // namespace
 
 void nvfp4_linear_swiglu_small_t_launch(const Tensor& x, const Weight& weight, Tensor& out,
                                         cudaStream_t stream) {
     const std::size_t index = static_cast<std::size_t>(x.ne[1] - 2);
-    kLaunchers[index](x, weight, out, stream);
+    switch (resolve_nvfp4_geometry(weight.n, weight.k)) {
+    case Nvfp4GeometryId::N34816K5120:
+        kGateUp34816Launchers[index](x, weight, out, stream);
+        return;
+    case Nvfp4GeometryId::N17408K5120:
+        kGateUp17408Launchers[index](x, weight, out, stream);
+        return;
+    case Nvfp4GeometryId::N14336K5120:
+    case Nvfp4GeometryId::N16384K5120:
+    case Nvfp4GeometryId::N5120K6144:
+    case Nvfp4GeometryId::N5120K17408:
+    case Nvfp4GeometryId::N5120K8704:
+        break;
+    }
+    throw std::invalid_argument("nvfp4 linear_swiglu: unsupported problem");
 }
 
 } // namespace ninfer::ops::detail

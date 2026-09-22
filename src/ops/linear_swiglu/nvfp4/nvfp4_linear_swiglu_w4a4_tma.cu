@@ -55,19 +55,10 @@ Nvfp4W4a4TmaDescriptors make_descriptors(const std::uint8_t* activation_codes,
     return descriptors;
 }
 
-} // namespace
-
-void launch_nvfp4_linear_swiglu_w4a4_tma(const std::uint8_t* activation_codes,
-                                         const std::uint8_t* activation_scales,
-                                         const std::uint8_t* weight_codes,
-                                         const std::uint8_t* weight_scales, __nv_bfloat16* output,
-                                         std::int32_t tokens, float alpha, cudaStream_t stream) {
-    if (tokens < M256N128S3::kBlockM || (tokens % M256N128S3::kBlockM) != 0) {
-        throw std::invalid_argument(
-            "nvfp4 LinearSwiGLU TMA requires a positive M256 full-tile token count");
-    }
-
-    using Geometry                     = Nvfp4N34816K5120;
+template <class Geometry>
+void launch(const std::uint8_t* activation_codes, const std::uint8_t* activation_scales,
+            const std::uint8_t* weight_codes, const std::uint8_t* weight_scales,
+            __nv_bfloat16* output, std::int32_t tokens, float alpha, cudaStream_t stream) {
     constexpr std::size_t kSharedBytes = sizeof(Nvfp4LinearSwiGluTmaSharedStorage<M256N128S3>);
     static FuncAttrPerDevice attr;
     attr.ensure(nvfp4_linear_swiglu_w4a4_tma_kernel<Geometry, M256N128S3>,
@@ -80,6 +71,37 @@ void launch_nvfp4_linear_swiglu_w4a4_tma(const std::uint8_t* activation_codes,
     nvfp4_linear_swiglu_w4a4_tma_kernel<Geometry, M256N128S3>
         <<<grid, M256N128S3::kThreads, kSharedBytes, stream>>>(descriptors, alpha, output);
     CUDA_CHECK(cudaGetLastError());
+}
+
+} // namespace
+
+void launch_nvfp4_linear_swiglu_w4a4_tma(Nvfp4GeometryId problem,
+                                         const std::uint8_t* activation_codes,
+                                         const std::uint8_t* activation_scales,
+                                         const std::uint8_t* weight_codes,
+                                         const std::uint8_t* weight_scales, __nv_bfloat16* output,
+                                         std::int32_t tokens, float alpha, cudaStream_t stream) {
+    if (tokens < M256N128S3::kBlockM || (tokens % M256N128S3::kBlockM) != 0) {
+        throw std::invalid_argument(
+            "nvfp4 LinearSwiGLU TMA requires a positive M256 full-tile token count");
+    }
+    switch (problem) {
+    case Nvfp4GeometryId::N34816K5120:
+        launch<Nvfp4N34816K5120>(activation_codes, activation_scales, weight_codes, weight_scales,
+                                 output, tokens, alpha, stream);
+        return;
+    case Nvfp4GeometryId::N17408K5120:
+        launch<Nvfp4N17408K5120>(activation_codes, activation_scales, weight_codes, weight_scales,
+                                 output, tokens, alpha, stream);
+        return;
+    case Nvfp4GeometryId::N14336K5120:
+    case Nvfp4GeometryId::N16384K5120:
+    case Nvfp4GeometryId::N5120K6144:
+    case Nvfp4GeometryId::N5120K17408:
+    case Nvfp4GeometryId::N5120K8704:
+        break;
+    }
+    throw std::invalid_argument("nvfp4 LinearSwiGLU TMA: unsupported problem");
 }
 
 } // namespace ninfer::ops::detail

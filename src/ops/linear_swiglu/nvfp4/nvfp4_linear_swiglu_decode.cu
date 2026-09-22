@@ -9,19 +9,20 @@
 
 #include <cuda_bf16.h>
 
+#include <stdexcept>
+
 namespace ninfer::ops::detail {
 namespace {
 
-using Geometry = Nvfp4N34816K5120;
 using Schedule =
     Nvfp4GemvSchedule<8, 2, 16, 4, Nvfp4ScaleAccess::Direct, Nvfp4CodeCache::Default, 2>;
 
-constexpr int kIntermediate = Geometry::kOutputRows / 2;
 static_assert(Schedule::kRowsPerWarp == 2);
 static_assert((Schedule::kWarpsPerCta % 4) == 0);
 static_assert((128 % Schedule::kWarpsPerCta) == 0);
-static_assert((kIntermediate % Schedule::kWarpsPerCta) == 0);
 
+// Geometry is the gate/up problem: gate rows [0,M) precede their up rows [M,2M), M = N/2.
+template <class Geometry>
 __global__ __launch_bounds__(
     Schedule::kThreads,
     Schedule::
@@ -32,6 +33,8 @@ __global__ __launch_bounds__(
                                                                     uint8_t* __restrict__ scales,
                                                                 float inverse_weight_divisor,
                                                                 __nv_bfloat16* __restrict__ out) {
+    constexpr int kIntermediate = Geometry::kOutputRows / 2;
+    static_assert((kIntermediate % 128) == 0);
     __shared__ Nvfp4GemvSharedStorage<Geometry, Schedule> shared;
     constexpr int kCtasPerM128                    = 128 / Schedule::kWarpsPerCta;
     const int block                               = static_cast<int>(blockIdx.x);
@@ -62,17 +65,36 @@ __global__ __launch_bounds__(
     if (lane == 0) { out[gate_row] = __float2bfloat16_rn(silu(gate) * up); }
 }
 
-} // namespace
-
-void nvfp4_linear_swiglu_decode_launch(const Tensor& x, const Weight& weight, Tensor& out,
-                                       cudaStream_t stream) {
-    constexpr int kBlocks = kIntermediate / Schedule::kWarpsPerCta;
+template <class Geometry>
+void launch(const Tensor& x, const Weight& weight, Tensor& out, cudaStream_t stream) {
+    constexpr int kBlocks = (Geometry::kOutputRows / 2) / Schedule::kWarpsPerCta;
     const float inverse   = 1.0F / weight.weight_scale_divisor;
-    nvfp4_linear_swiglu_decode_kernel<<<kBlocks, Schedule::kThreads, 0, stream>>>(
+    nvfp4_linear_swiglu_decode_kernel<Geometry><<<kBlocks, Schedule::kThreads, 0, stream>>>(
         static_cast<const __nv_bfloat16*>(x.data), static_cast<const std::uint8_t*>(weight.qdata),
         static_cast<const std::uint8_t*>(weight.scales), inverse,
         static_cast<__nv_bfloat16*>(out.data));
     CUDA_CHECK(cudaGetLastError());
+}
+
+} // namespace
+
+void nvfp4_linear_swiglu_decode_launch(const Tensor& x, const Weight& weight, Tensor& out,
+                                       cudaStream_t stream) {
+    switch (resolve_nvfp4_geometry(weight.n, weight.k)) {
+    case Nvfp4GeometryId::N34816K5120:
+        launch<Nvfp4N34816K5120>(x, weight, out, stream);
+        return;
+    case Nvfp4GeometryId::N17408K5120:
+        launch<Nvfp4N17408K5120>(x, weight, out, stream);
+        return;
+    case Nvfp4GeometryId::N14336K5120:
+    case Nvfp4GeometryId::N16384K5120:
+    case Nvfp4GeometryId::N5120K6144:
+    case Nvfp4GeometryId::N5120K17408:
+    case Nvfp4GeometryId::N5120K8704:
+        break;
+    }
+    throw std::invalid_argument("nvfp4 linear_swiglu: unsupported problem");
 }
 
 } // namespace ninfer::ops::detail

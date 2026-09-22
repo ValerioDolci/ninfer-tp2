@@ -12,19 +12,20 @@
 #include <cuda_bf16.h>
 
 #include <cstdint>
+#include <stdexcept>
 
 namespace ninfer::ops::detail {
 namespace {
 
-using Geometry = Nvfp4N34816K5120;
 // Column tiles amortize gate/up decode over the complete speculative block.
 using M64N128  = Nvfp4W4a4MmaSchedule<64, 128, 256, 4, 4, 2, 1>;
 using M128N128 = Nvfp4W4a4MmaSchedule<128, 128, 256, 4, 4, 2, 1>;
 using M96N128  = Nvfp4W4a4MmaSchedule<96, 128, 256, 3, 4, 2, 1>;
 
-constexpr int kIntermediate = Geometry::kOutputRows / 2;
-
+// Geometry is the gate/up problem: gate rows [0,M) precede their up rows [M,2M), M = N/2.
+template <class Geometry>
 struct Nvfp4SwiGluRows {
+    static constexpr int kIntermediate  = Geometry::kOutputRows / 2;
     static constexpr bool kContiguous   = false;
     static constexpr int kRowsPerBranch = M64N128::kBlockN / 2;
 
@@ -39,7 +40,10 @@ union Nvfp4SwiGluBf16Pair {
     __nv_bfloat162 values;
 };
 
+template <class Geometry>
 struct Nvfp4SwiGluOutput {
+    static constexpr int kIntermediate = Geometry::kOutputRows / 2;
+
     __nv_bfloat16* data;
 
     __device__ __forceinline__ unsigned combine(unsigned gate_bits, unsigned up_bits) const {
@@ -61,46 +65,69 @@ struct Nvfp4SwiGluOutput {
     }
 };
 
-template <class Schedule>
+template <class Geometry, class Schedule>
 void launch_gemm(const Weight& weight, Tensor& out, Nvfp4W4a4Workspace workspace,
                  std::int32_t tokens, cudaStream_t stream) {
+    using Rows              = Nvfp4SwiGluRows<Geometry>;
+    using Output            = Nvfp4SwiGluOutput<Geometry>;
     constexpr int kPairRows = Schedule::kBlockN / 2;
-    static_assert(kPairRows == Nvfp4SwiGluRows::kRowsPerBranch);
-    const dim3 grid(kIntermediate / kPairRows,
+    static_assert(kPairRows == Rows::kRowsPerBranch);
+    static_assert((Rows::kIntermediate % kPairRows) == 0);
+    const dim3 grid(Rows::kIntermediate / kPairRows,
                     (tokens + Schedule::kBlockM - 1) / Schedule::kBlockM);
     const Nvfp4W4a4MaterializedActivation activation{workspace.codes, workspace.scales};
-    const Nvfp4SwiGluRows row_policy{};
-    const Nvfp4SwiGluOutput output{static_cast<__nv_bfloat16*>(out.data)};
+    const Rows row_policy{};
+    const Output output{static_cast<__nv_bfloat16*>(out.data)};
     const float alpha = 1.0F / (weight.input_scale_divisor * weight.weight_scale_divisor);
-    nvfp4_w4a4_mma_kernel<Geometry, Schedule, Nvfp4IdentityEpilogue, Nvfp4SwiGluOutput,
-                          Nvfp4SwiGluRows, true><<<grid, Schedule::kThreads, 0, stream>>>(
-        activation, static_cast<const std::uint8_t*>(weight.qdata),
-        static_cast<const std::uint8_t*>(weight.scales), tokens, alpha, Nvfp4IdentityEpilogue{},
-        output, row_policy);
+    nvfp4_w4a4_mma_kernel<Geometry, Schedule, Nvfp4IdentityEpilogue, Output, Rows, true>
+        <<<grid, Schedule::kThreads, 0, stream>>>(
+            activation, static_cast<const std::uint8_t*>(weight.qdata),
+            static_cast<const std::uint8_t*>(weight.scales), tokens, alpha, Nvfp4IdentityEpilogue{},
+            output, row_policy);
     CUDA_CHECK(cudaGetLastError());
 }
 
-template <class Schedule>
+template <class Geometry, class Schedule>
 void launch(const Tensor& x, const Weight& weight, Tensor& out, WorkspaceArena& workspace,
             cudaStream_t stream) {
     auto scope = workspace.scope();
     const Nvfp4W4a4Workspace scratch =
         allocate_nvfp4_w4a4_workspace(workspace, x.ne[1], Geometry::kInputRows);
     launch_nvfp4_w4a4_quantize(x, weight, scratch, Nvfp4ScaleLayout::RowMajor, stream);
-    launch_gemm<Schedule>(weight, out, scratch, x.ne[1], stream);
+    launch_gemm<Geometry, Schedule>(weight, out, scratch, x.ne[1], stream);
+}
+
+template <class Geometry>
+void launch_problem(const Tensor& x, const Weight& weight, Tensor& out, WorkspaceArena& workspace,
+                    cudaStream_t stream) {
+    if (x.ne[1] <= M64N128::kBlockM) {
+        launch<Geometry, M64N128>(x, weight, out, workspace, stream);
+    } else if (x.ne[1] <= M96N128::kBlockM) {
+        launch<Geometry, M96N128>(x, weight, out, workspace, stream);
+    } else {
+        launch<Geometry, M128N128>(x, weight, out, workspace, stream);
+    }
 }
 
 } // namespace
 
 void nvfp4_linear_swiglu_w4a4_launch(const Tensor& x, const Weight& weight, Tensor& out,
                                      WorkspaceArena& workspace, cudaStream_t stream) {
-    if (x.ne[1] <= M64N128::kBlockM) {
-        launch<M64N128>(x, weight, out, workspace, stream);
-    } else if (x.ne[1] <= M96N128::kBlockM) {
-        launch<M96N128>(x, weight, out, workspace, stream);
-    } else {
-        launch<M128N128>(x, weight, out, workspace, stream);
+    switch (resolve_nvfp4_geometry(weight.n, weight.k)) {
+    case Nvfp4GeometryId::N34816K5120:
+        launch_problem<Nvfp4N34816K5120>(x, weight, out, workspace, stream);
+        return;
+    case Nvfp4GeometryId::N17408K5120:
+        launch_problem<Nvfp4N17408K5120>(x, weight, out, workspace, stream);
+        return;
+    case Nvfp4GeometryId::N14336K5120:
+    case Nvfp4GeometryId::N16384K5120:
+    case Nvfp4GeometryId::N5120K6144:
+    case Nvfp4GeometryId::N5120K17408:
+    case Nvfp4GeometryId::N5120K8704:
+        break;
     }
+    throw std::invalid_argument("nvfp4 linear_swiglu: unsupported problem");
 }
 
 } // namespace ninfer::ops::detail
