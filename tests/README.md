@@ -8,7 +8,8 @@ benchmark-report, and external protocol behavior. Repository verification princi
 ## Organization
 
 - `artifact/` — v3 framing, directory/binding records, codecs, sharding, selected-object
-  materialization and Python-writer/C++-reader interoperability;
+  materialization, load-time parent slices and two-device placement, and Python-writer/C++-reader
+  interoperability;
 - `convert/` — source interpretation, Qwen logical mapping, recipe overrides/sharing, optional
   components, resources, proposals and numerical conversion methods;
 - `models/qwen3_5/` — config/binding, frontend, state/context stores, workspace, MTP alignment and
