@@ -4,6 +4,7 @@
 
 #include "ops/common/math.h"
 #include "ops/kv_cache/append/launch.h"
+#include "ops/launcher/kernel_attr_once.h"
 #include "ops/softmax_attention/dense/causal_cache/prompt_bf16.cuh"
 #include "ops/softmax_attention/dense/causal_cache/prompt_i8.cuh"
 #include "core/device.h" // CUDA_CHECK
@@ -21,14 +22,12 @@ void causal_attention_prompt_attention_launch_for(const Tensor& q, const Tensor&
     const Tensor& cache_k = cache.k_pages;
     const Tensor& cache_v = cache.v_pages;
     // Both dtype-specialized kernels exceed the default 48 KiB dynamic-smem ceiling.
-    static const cudaError_t attr_bf16 =
-        cudaFuncSetAttribute(causal_attention_prompt_bf16_kernel<Geometry, Metadata>,
-                             cudaFuncAttributeMaxDynamicSharedMemorySize, kCausalPromptSmemBytes);
-    CUDA_CHECK(attr_bf16);
-    static const cudaError_t attr_i8 =
-        cudaFuncSetAttribute(causal_attention_prompt_i8_kernel<Geometry, Metadata>,
-                             cudaFuncAttributeMaxDynamicSharedMemorySize, kCausalPromptI8SmemBytes);
-    CUDA_CHECK(attr_i8);
+    static FuncAttrPerDevice attr_bf16;
+    attr_bf16.ensure(causal_attention_prompt_bf16_kernel<Geometry, Metadata>,
+                     cudaFuncAttributeMaxDynamicSharedMemorySize, kCausalPromptSmemBytes);
+    static FuncAttrPerDevice attr_i8;
+    attr_i8.ensure(causal_attention_prompt_i8_kernel<Geometry, Metadata>,
+                   cudaFuncAttributeMaxDynamicSharedMemorySize, kCausalPromptI8SmemBytes);
 
     const auto tokens = static_cast<std::int32_t>(q.ne[2]);
     if (cache.storage == KvCacheStorage::Int8Group64) {

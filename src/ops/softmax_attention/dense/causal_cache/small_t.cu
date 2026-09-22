@@ -4,6 +4,7 @@
 
 #include "core/paged_kv_storage.h"
 #include "ops/common/math.h"
+#include "ops/launcher/kernel_attr_once.h"
 #include "ops/softmax_attention/dense/causal_cache/small_t.cuh"
 #include "ops/softmax_attention/dense/causal_cache/small_t_bf16.cuh"
 #include "ops/softmax_attention/dense/causal_cache/small_t_i8.cuh"
@@ -137,12 +138,12 @@ void launch_tc_partial_i8(const Tensor& q, CacheInput input, const Tensor& pos, 
         constexpr std::size_t kDynamicBytes =
             DynamicArena ? static_cast<std::size_t>(4 * KeyBlock * kCausalHeadDim) : 0u;
         if constexpr (DynamicArena) {
-            static const cudaError_t attr = cudaFuncSetAttribute(
+            static FuncAttrPerDevice attr;
+            attr.ensure(
                 causal_attention_small_t_i8_tiled_kernel<Geometry, TokenTile, WarpsPerCta,
                                                          MinBlocksPerSm, KeyBlock, DynamicArena,
                                                          MultiBatch, Masked, CacheInput>,
                 cudaFuncAttributeMaxDynamicSharedMemorySize, static_cast<int>(kDynamicBytes));
-            CUDA_CHECK(attr);
         }
         causal_attention_small_t_i8_tiled_kernel<Geometry, TokenTile, WarpsPerCta, MinBlocksPerSm,
                                                  KeyBlock, DynamicArena, MultiBatch, Masked,

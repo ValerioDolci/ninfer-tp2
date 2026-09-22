@@ -1,5 +1,6 @@
 #pragma once
 #include "core/device.h"
+#include "ops/launcher/kernel_attr_once.h"
 #include "ops/linear/fp8/fp8_launch.h"
 #include "ops/linear/fp8/fp8_gemv.cuh"
 #include "ops/linear/fp8/fp8_simt.cuh"
@@ -56,11 +57,10 @@ void launch_fp8_a8_mma(const Weight& weight, Tensor& out, Fp8A8Workspace workspa
     const Fp8ContiguousOutput output{static_cast<__nv_bfloat16*>(out.data), Geometry::kOutputRows};
 
     if constexpr (Schedule::kSharedBytes > 48 * 1024) {
-        static const cudaError_t attribute = cudaFuncSetAttribute(
-            fp8_mma_kernel<Geometry, Schedule, FullTokens, Fp8IdentityEpilogue,
-                           Fp8ContiguousOutput>,
-            cudaFuncAttributeMaxDynamicSharedMemorySize, Schedule::kSharedBytes);
-        CUDA_CHECK(attribute);
+        static FuncAttrPerDevice attribute;
+        attribute.ensure(fp8_mma_kernel<Geometry, Schedule, FullTokens, Fp8IdentityEpilogue,
+                                        Fp8ContiguousOutput>,
+                         cudaFuncAttributeMaxDynamicSharedMemorySize, Schedule::kSharedBytes);
     }
     fp8_mma_kernel<Geometry, Schedule, FullTokens>
         <<<blocks, Schedule::kThreads, Schedule::kSharedBytes, stream>>>(

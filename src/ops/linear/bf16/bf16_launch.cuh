@@ -1,6 +1,7 @@
 #pragma once
 #include "core/device.h"
 #include "ops/common/math.h"
+#include "ops/launcher/kernel_attr_once.h"
 #include "ops/linear/bf16/bf16_launch.h"
 #include "ops/linear/bf16/bf16_gemv.cuh"
 #include "ops/linear/bf16/bf16_simt.cuh"
@@ -39,10 +40,9 @@ void launch_bf16_mma_variant(const Tensor& x, const Weight& weight, Tensor& out,
     const Bf16MmaContiguousOutput output{static_cast<__nv_bfloat16*>(out.data),
                                          Geometry::kOutputRows};
     if constexpr (Schedule::kSharedBytes > 48 * 1024) {
-        static const cudaError_t attr = cudaFuncSetAttribute(
-            bf16_gemm_mma_kernel<Geometry, Schedule, FullTokens, Bf16MmaContiguousOutput>,
-            cudaFuncAttributeMaxDynamicSharedMemorySize, Schedule::kSharedBytes);
-        CUDA_CHECK(attr);
+        static FuncAttrPerDevice attr;
+        attr.ensure(bf16_gemm_mma_kernel<Geometry, Schedule, FullTokens, Bf16MmaContiguousOutput>,
+                    cudaFuncAttributeMaxDynamicSharedMemorySize, Schedule::kSharedBytes);
     }
     bf16_gemm_mma_kernel<Geometry, Schedule, FullTokens>
         <<<blocks, Schedule::kThreads, Schedule::kSharedBytes, stream>>>(

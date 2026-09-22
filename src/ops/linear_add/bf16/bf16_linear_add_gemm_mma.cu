@@ -3,6 +3,7 @@
 
 #include "core/device.h"
 #include "ops/common/math.h"
+#include "ops/launcher/kernel_attr_once.h"
 #include "ops/linear/bf16/bf16_config.h"
 #include "ops/linear/bf16/bf16_gemm_mma.cuh"
 
@@ -48,10 +49,9 @@ void launch_variant(const Tensor& x, const Weight& weight, Tensor& residual, cud
                                         Geometry::kOutputRows};
 
     if constexpr (Schedule::kSharedBytes > 48 * 1024) {
-        static const cudaError_t attr = cudaFuncSetAttribute(
-            bf16_gemm_mma_kernel<Geometry, Schedule, FullTokens, Bf16LinearAddMmaOutput>,
-            cudaFuncAttributeMaxDynamicSharedMemorySize, Schedule::kSharedBytes);
-        CUDA_CHECK(attr);
+        static FuncAttrPerDevice attr;
+        attr.ensure(bf16_gemm_mma_kernel<Geometry, Schedule, FullTokens, Bf16LinearAddMmaOutput>,
+                    cudaFuncAttributeMaxDynamicSharedMemorySize, Schedule::kSharedBytes);
     }
     bf16_gemm_mma_kernel<Geometry, Schedule, FullTokens>
         <<<blocks, Schedule::kThreads, Schedule::kSharedBytes, stream>>>(

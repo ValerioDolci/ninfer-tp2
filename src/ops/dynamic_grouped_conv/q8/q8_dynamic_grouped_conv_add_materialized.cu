@@ -1,6 +1,7 @@
 #include "core/weight.h"
 #include "ops/dynamic_grouped_conv/q8/q8_dynamic_grouped_conv_add_kernels.h"
 #include "core/device.h"
+#include "ops/launcher/kernel_attr_once.h"
 #include "ops/linear/q8/q8_ksplit_config.h"
 #include "ops/linear/q8/q8_launch.h"
 #include "ops/linear/q8/q8_rowsplit_output.cuh"
@@ -43,11 +44,11 @@ void tiled_projection(const Tensor& x, const Weight& weight, Tensor& out, cudaSt
                                                  Q8KSplitScaleAccess::Shared, Activation>;
     constexpr int SharedBytes = TileColumns > 64 ? sizeof(Q8KSplitSharedStorage<Schedule>) : 0;
     if constexpr (SharedBytes > 0) {
-        static const cudaError_t attribute = cudaFuncSetAttribute(
+        static FuncAttrPerDevice attribute;
+        attribute.ensure(
             q8_ksplit_mma_kernel<Geometry, TileColumns, Schedule, Q8ContiguousOutput,
                                  Q8KSplitStoreEpilogue, Q8KSplitIdentityRows, false, true>,
             cudaFuncAttributeMaxDynamicSharedMemorySize, SharedBytes);
-        CUDA_CHECK(attribute);
     }
     const int columns = x.ne[1];
     Q8ContiguousOutput output{static_cast<__nv_bfloat16*>(out.data), kRows};
