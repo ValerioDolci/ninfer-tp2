@@ -81,6 +81,11 @@ void causal_attention_prompt_attention_launch(const Tensor& q, const Tensor& pos
                                                                        metadata, out, stream);
         return;
     }
+    if (q.ne[1] == CausalD256H12Kv2::QHeads) {
+        causal_attention_prompt_attention_launch_for<CausalD256H12Kv2>(q, positions, scale, cache,
+                                                                       metadata, out, stream);
+        return;
+    }
     causal_attention_prompt_attention_launch_for<CausalD256H16Kv2>(q, positions, scale, cache,
                                                                    metadata, out, stream);
 }
@@ -115,6 +120,11 @@ void causal_attention_prompt_launch(const Tensor& q, const Tensor& k, const Tens
         };
         if (q.ne[1] == CausalD256H24Kv4::QHeads) {
             causal_attention_prompt_attention_launch_for<CausalD256H24Kv4>(
+                q, positions, scale, cache, metadata, out, stream);
+            return;
+        }
+        if (q.ne[1] == CausalD256H12Kv2::QHeads) {
+            causal_attention_prompt_attention_launch_for<CausalD256H12Kv2>(
                 q, positions, scale, cache, metadata, out, stream);
             return;
         }

@@ -44,6 +44,18 @@ __launch_bounds__(128, 2) __global__ void causal_attention_small_t_tc_partial_bf
 
     static_assert(QkvRows >= Br);
 
+    // Occupancy guard: `__launch_bounds__` asks for two CTAs per SM, and `PageIds` is sized from
+    // the Op's visible-key domain. See kCausalSmallTSharedResidencyBytes.
+    constexpr int MinBlocksPerSm = 2;
+    constexpr int Bf16Bytes      = static_cast<int>(sizeof(__nv_bfloat16));
+    constexpr int SharedBytes =
+        causal_shared_align16(QkvRows * D * Bf16Bytes) +  // qkv_s
+        causal_shared_align16(Wc * 16 * Bc * Bf16Bytes) + // p_s
+        causal_shared_align16(PageIds * static_cast<int>(sizeof(std::int32_t)));
+    static_assert(SharedBytes * MinBlocksPerSm <= kCausalSmallTSharedResidencyBytes,
+                  "BF16 small-T CTA shared memory no longer fits its MinBlocksPerSm target on one "
+                  "SM; a larger kCausalAttentionMaximumVisibleKeys needs a retuned split policy");
+
     __shared__ __align__(16) __nv_bfloat16 qkv_s[QkvRows * D];
     __shared__ __align__(16) __half p_s[Wc * 16 * Bc];
     __shared__ std::int32_t physical_pages_s[PageIds];

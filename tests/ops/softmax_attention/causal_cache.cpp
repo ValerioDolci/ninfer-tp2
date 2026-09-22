@@ -115,6 +115,10 @@ constexpr Geometry kGeometries[] = {
     {"d256-h16-kv2", 16, 2},
 };
 
+// One device's half of d256-h24-kv4 under two-device tensor parallelism. Only the BF16 and INT8
+// caches register it.
+constexpr Geometry kTensorParallelGeometry{"d256-h12-kv2", 12, 2};
+
 ops::AttentionHeadGeometry op_geometry(const Geometry& geometry) {
     return {kHeadDim, geometry.q_heads, geometry.kv_heads};
 }
@@ -2285,6 +2289,36 @@ int run_geometry(const Geometry& geometry) {
     return failures;
 }
 
+int run_tensor_parallel_geometry_cases() {
+    const Geometry& geometry = kTensorParallelGeometry;
+    int failures             = run_geometry(geometry);
+    for (const KvCacheStorage storage : {KvCacheStorage::BFloat16, KvCacheStorage::Int8Group64}) {
+        // The widest chunked small-T width, then decode and verify batches.
+        failures += run_a1_case(geometry, storage, {16, 17, 48, 1601u}, MappingPattern::Identity);
+        failures +=
+            run_a3_case(geometry, storage, {16, 2041, 2057, 1602u}, MappingPattern::Fragmented);
+        failures += run_batch_case(
+            geometry, storage,
+            {1, {0, 63, 127, 2048}, {1, 1, 1, 1}, {3, 0, 2, 1}, MappingPattern::Fragmented, 1603u});
+        failures += run_batch_case(
+            geometry, storage, {6, {61, 127}, {6, 3}, {1, 0}, MappingPattern::Fragmented, 1604u});
+        failures += run_batch_case(
+            geometry, storage, {16, {49, 2041}, {16, 7}, {1, 0}, MappingPattern::Identity, 1605u});
+    }
+    for (const KvCacheStorage storage :
+         {KvCacheStorage::Fp8E4M3Row256, KvCacheStorage::Nvfp4Group16,
+          KvCacheStorage::Fp8KeyNvfp4Value}) {
+        try {
+            (void)ops::causal_softmax_attention_workspace_capacity_bytes(op_geometry(geometry),
+                                                                         storage, {1, 64}, 1, 1, 1);
+            std::cerr << "causal_softmax_attention admitted " << geometry.name << " with a "
+                      << cache_name(storage) << " cache\n";
+            ++failures;
+        } catch (const std::invalid_argument&) {}
+    }
+    return failures;
+}
+
 int run_fp8_cases() {
     int failures = 0;
     for (const Geometry& geometry : kGeometries) {
@@ -2465,6 +2499,7 @@ int run_softmax_attention_causal_cache_tests() {
     failures += run_quantized_batch_cases(KvCacheStorage::Fp8KeyNvfp4Value, 815u);
     failures += report_quantization_quality(KvCacheStorage::Fp8KeyNvfp4Value, 819u);
     for (const Geometry& geometry : kGeometries) { failures += run_geometry(geometry); }
+    failures += run_tensor_parallel_geometry_cases();
     failures += run_fp8_cases();
     failures += run_batch_cases();
     failures += run_dflash2_cases();

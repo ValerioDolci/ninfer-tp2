@@ -25,7 +25,7 @@ constexpr std::uint32_t kThreeChunkPromptVisibleKeys = 1024;
 std::int32_t causal_attention_chunk_tokens(std::int32_t q_heads, std::int32_t width,
                                            std::int32_t batch_size, KvCacheStorage storage,
                                            CausalAttentionExecutionEnvelope envelope) {
-    if (q_heads == 16) return 6;
+    if (q_heads == 12 || q_heads == 16) return 6;
     // Balance the two narrow BF16 chunks; INT8 benefits from 5+4/5 at long contexts.
     if (batch_size == 1 && ((storage == KvCacheStorage::BFloat16 && width >= 9 && width <= 12) ||
                             (storage == KvCacheStorage::Int8Group64 && width >= 9 && width <= 10 &&
@@ -34,11 +34,19 @@ std::int32_t causal_attention_chunk_tokens(std::int32_t q_heads, std::int32_t wi
     return 8;
 }
 
-void require_causal_geometry(AttentionHeadGeometry geometry, const char* op) {
+void require_causal_geometry(AttentionHeadGeometry geometry, KvCacheStorage storage,
+                             const char* op) {
     if (!valid_attention_head_geometry(geometry) || geometry.head_dim != kHeadDim ||
         !((geometry.query_heads == 24 && geometry.kv_heads == 4) ||
+          (geometry.query_heads == 12 && geometry.kv_heads == 2) ||
           (geometry.query_heads == 16 && geometry.kv_heads == 2))) {
         throw std::invalid_argument(std::string(op) + ": unsupported head geometry");
+    }
+    // The 12/2 two-device half is instantiated by the BF16 and INT8 cache kernels only.
+    if (geometry.query_heads == 12 && storage != KvCacheStorage::BFloat16 &&
+        storage != KvCacheStorage::Int8Group64) {
+        throw std::invalid_argument(std::string(op) +
+                                    ": head geometry 12/2 requires a BF16 or INT8 cache");
     }
 }
 
@@ -189,7 +197,7 @@ void validate_attention_tensors(const Tensor& q, const Tensor& positions, const 
                                 AttentionHeadGeometry geometry, const PagedKVLayerView& cache,
                                 CausalAttentionExecutionEnvelope envelope, float scale,
                                 const char* op) {
-    require_causal_geometry(geometry, op);
+    require_causal_geometry(geometry, cache.storage, op);
     if (q.dtype != DType::BF16 || out.dtype != DType::BF16) {
         throw std::invalid_argument(std::string(op) + ": q/out must be BF16");
     }
@@ -221,7 +229,7 @@ void validate_batched_attention_tensors(const Tensor& q, const Tensor& positions
                                         AttentionHeadGeometry geometry,
                                         CausalAttentionExecutionEnvelope envelope, float scale,
                                         const char* op) {
-    require_causal_geometry(geometry, op);
+    require_causal_geometry(geometry, cache.storage, op);
     if (q.dtype != DType::BF16 || out.dtype != DType::BF16) {
         throw std::invalid_argument(std::string(op) + ": q/out must be BF16");
     }
@@ -369,6 +377,13 @@ CausalAttentionRoute causal_attention_resolve_route(std::int32_t q_heads, std::i
         }
         return width <= 8 ? CausalAttentionRoute::SmallT : CausalAttentionRoute::ChunkedSmallT;
     }
+    if (q_heads == 12) {
+        // tp2 shard: decode/verify widths keep the split-K small-T kernels (captured in the decode
+        // graphs); prefill-scale widths take the dense prompt kernel instead of ~T/6 chunks.
+        if (width <= 6) return CausalAttentionRoute::SmallT;
+        if (width <= kMaximumVerifyTokens) return CausalAttentionRoute::ChunkedSmallT;
+        return CausalAttentionRoute::Prompt;
+    }
     if (width <= 6) return CausalAttentionRoute::SmallT;
     if (batch_size > 1) return CausalAttentionRoute::ChunkedSmallT;
     const std::uint32_t prompt_visible_keys =
@@ -397,7 +412,7 @@ std::size_t causal_softmax_attention_workspace_capacity_bytes(
     AttentionHeadGeometry geometry, KvCacheStorage cache_storage,
     CausalAttentionExecutionEnvelope envelope, std::int32_t batch_size, std::int32_t min_width,
     std::int32_t max_width) {
-    require_causal_geometry(geometry, "causal_softmax_attention workspace");
+    require_causal_geometry(geometry, cache_storage, "causal_softmax_attention workspace");
     const std::int32_t q_heads = geometry.query_heads;
     bool supported_dtype       = true;
     try {
