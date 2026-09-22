@@ -116,6 +116,16 @@ void launch_nvfp4_w4a4_tma_linear(Nvfp4GeometryId problem, const std::uint8_t* a
         launch_linear<Nvfp4N5120K17408>(activation_codes, activation_scales, weight_codes,
                                         weight_scales, output, tokens, alpha, stream);
         return;
+    // The two-device shards keep their parent's TMA schedule.
+    case Nvfp4GeometryId::N17408K5120:
+        launch_linear<Nvfp4N17408K5120, TmaM256N128Prefetch128B>(
+            activation_codes, activation_scales, weight_codes, weight_scales, output, tokens, alpha,
+            stream);
+        return;
+    case Nvfp4GeometryId::N5120K8704:
+        launch_linear<Nvfp4N5120K8704>(activation_codes, activation_scales, weight_codes,
+                                       weight_scales, output, tokens, alpha, stream);
+        return;
     }
 }
 
@@ -168,6 +178,8 @@ void launch_nvfp4_w4a4_tma_linear_add(Nvfp4GeometryId problem, const std::uint8_
     case Nvfp4GeometryId::N14336K5120:
     case Nvfp4GeometryId::N16384K5120:
     case Nvfp4GeometryId::N34816K5120:
+    case Nvfp4GeometryId::N17408K5120:
+    case Nvfp4GeometryId::N5120K8704:
         break;
     }
     throw std::logic_error("nvfp4 W4A4 TMA linear_add has no route for this geometry");

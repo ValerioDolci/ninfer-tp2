@@ -45,6 +45,13 @@ int run_nvfp4_a4() {
                           {5120, 6144, 723U, Comparison::Sampled, true, invocations});
     failures += run_shape("NVFP4_A4", ActivationCompute::A4, make_nvfp4_weight,
                           {5120, 17408, 725U, Comparison::Sampled, true, invocations});
+    // Two-device halves of the MLP projections, across their MMA and TMA routes. The fixture
+    // repeats every 16 rows, so T=1 compares 16 distinct dot products and whether A4 meets its
+    // allowance there depends on the seed, not on N. The gate/up half uses its parent's seed.
+    failures += run_shape("NVFP4_A4", ActivationCompute::A4, make_nvfp4_weight,
+                          {17408, 5120, 722U, Comparison::Sampled, true, invocations});
+    failures += run_shape("NVFP4_A4", ActivationCompute::A4, make_nvfp4_weight,
+                          {5120, 8704, 729U, Comparison::Sampled, true, invocations});
     return failures;
 }
 
