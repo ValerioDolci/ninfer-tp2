@@ -21,9 +21,9 @@ namespace {
 void validate_graph_profiles(const std::vector<GraphExecutionProfile>& profiles,
                              std::uint32_t max_frontier, const char* label);
 
-template <class Prepare>
+template <class Prepare, class Synchronize>
 void instantiate_graph_family(DecodeGraphFamily& family, const char* label, DeviceContext& device,
-                              Prepare&& prepare);
+                              Prepare&& prepare, Synchronize&& synchronize);
 
 void validate_graph_profiles(const std::vector<GraphExecutionProfile>& profiles,
                              std::uint32_t max_frontier, const char* label) {
@@ -38,9 +38,11 @@ void validate_graph_profiles(const std::vector<GraphExecutionProfile>& profiles,
     }
 }
 
-template <class Prepare>
+// `synchronize` waits for every device a graph has nodes on: a tensor-parallel executable is
+// uploaded and launched from rank 0's stream as one unit, but its rank 1 nodes retire on rank 1.
+template <class Prepare, class Synchronize>
 void instantiate_graph_family(DecodeGraphFamily& family, const char* label, DeviceContext& device,
-                              Prepare&& prepare) {
+                              Prepare&& prepare, Synchronize&& synchronize) {
     if (family.profiles.empty()) {
         throw std::logic_error(std::string(label) + " CUDA Graph family has no profiles");
     }
@@ -71,7 +73,7 @@ void instantiate_graph_family(DecodeGraphFamily& family, const char* label, Devi
             topology.installed_profile = profile_index;
         }
         topology.executable.upload(device.stream);
-        device.synchronize();
+        synchronize();
     };
 
     for (DecodeGraphTopology& topology : family.topologies) {
@@ -84,9 +86,9 @@ void instantiate_graph_family(DecodeGraphFamily& family, const char* label, Devi
 
                     DecodeGraphProfile& profile = family.profiles[i];
                     prepare(profile.min_execution_frontier, profile.batch_size);
-                    device.synchronize();
+                    synchronize();
                     topology.executable.launch(device.stream);
-                    device.synchronize();
+                    synchronize();
                     continue;
                 }
                 install_and_upload(topology, i);
@@ -155,7 +157,10 @@ void ProgramImpl::prepare_graphs() {
         reserve_capture_rows(*dflash->full, *backend_kv_addresses, dflash_capture_allocations,
                              "DFlash Full KV cache");
     }
-    device.synchronize();
+    // Rank 1's capture rows, pages and StateImages follow through the mirrors attached at
+    // construction.
+    synchronize_devices();
+    const auto synchronize_all = [&] { synchronize_devices(); };
 
     const auto clear_stable_controls = [&] {
         std::vector<Tensor> controls{
@@ -174,6 +179,13 @@ void ProgramImpl::prepare_graphs() {
         for (const Tensor& tensor : controls) {
             CUDA_CHECK(cudaMemsetAsync(tensor.data, 0, tensor.bytes(), device.stream));
         }
+        if (peer) {
+            const ScopedCurrentDevice rank1(peer->device.device);
+            for (const Tensor& tensor :
+                 {peer->io.token, peer->io.pos, peer->io.rope_pos, peer->io.rope_delta}) {
+                CUDA_CHECK(cudaMemsetAsync(tensor.data, 0, tensor.bytes(), peer->device.stream));
+            }
+        }
     };
     const auto zero_capture_pages =
         [&](qwen3_5::PagedKVCache& cache, const KVAddressSpaceStore& addresses,
@@ -190,6 +202,7 @@ void ProgramImpl::prepare_graphs() {
             throw std::logic_error("CUDA Graph representative batch is invalid");
         }
         work.reset();
+        if (peer) { peer->work.reset(); }
         clear_stable_controls();
         zero_capture_pages(decoder->text_kv, *text_kv_addresses, text_capture_allocations,
                            batch_size);
@@ -298,23 +311,34 @@ void ProgramImpl::prepare_graphs() {
                                         io,
                                         prefill_hidden,
                                         prefill_chunk,
-                                        proposal_head};
+                                        proposal_head,
+                                        tp_binding(),
+                                        graph_peer_bridge()};
     };
 
     if (speculative_backend == SpeculativeBackend::None) {
         const auto ordinary_profiles = ordinary_graph_profiles(capacity);
         validate_graph_profiles(ordinary_profiles, capacity - 1, "ordinary");
         const std::uint32_t ordinary_batch_limit = max_concurrency;
-        execution::OrdinaryBatchContext ordinary_state{
-            execution_core(),      decoder->text_kv,
-            *io.ordinary,          *ordinary_host_ingress,
-            *ordinary_host_egress, state_images->continuation_hidden_store()};
+        execution::OrdinaryBatchContext ordinary_state{execution_core(),
+                                                       decoder->text_kv,
+                                                       *io.ordinary,
+                                                       *ordinary_host_ingress,
+                                                       *ordinary_host_egress,
+                                                       state_images->continuation_hidden_store(),
+                                                       peer ? &*peer->io.ordinary : nullptr};
         const GraphExecutionProfile code_warm = ordinary_profiles.front();
-        prepare_representative(code_warm.min, 1);
-        device.synchronize();
-        execution::ordinary_decode_batch(ordinary_state, 1, {code_warm.min + 1, code_warm.max + 1},
-                                         nullptr);
-        device.synchronize();
+        // A module first touched inside a capture region cannot be loaded there, and batch shape
+        // selects kernels. One eager batch-1 round warms the single-device code; at tp 2 every
+        // batch size is warmed eagerly on both devices before any capture.
+        const std::uint32_t warm_batches = tensor_parallel() ? ordinary_batch_limit : 1U;
+        for (std::uint32_t batch_size = 1; batch_size <= warm_batches; ++batch_size) {
+            prepare_representative(code_warm.min, batch_size);
+            synchronize_all();
+            execution::ordinary_decode_batch(ordinary_state, static_cast<std::int32_t>(batch_size),
+                                             {code_warm.min + 1, code_warm.max + 1}, nullptr);
+            synchronize_all();
+        }
 
         ordinary_graphs.profiles.reserve(ordinary_profiles.size() * ordinary_batch_limit);
         for (std::uint32_t batch_size = 1; batch_size <= ordinary_batch_limit; ++batch_size) {
@@ -421,13 +445,16 @@ void ProgramImpl::prepare_graphs() {
     }
 
     if (!ordinary_graphs.profiles.empty()) {
-        instantiate_graph_family(ordinary_graphs, "ordinary", device, prepare_representative);
+        instantiate_graph_family(ordinary_graphs, "ordinary", device, prepare_representative,
+                                 synchronize_all);
     }
     if (speculative_backend == SpeculativeBackend::Mtp) {
-        instantiate_graph_family(mtp_graphs, "MTP", device, prepare_representative);
+        instantiate_graph_family(mtp_graphs, "MTP", device, prepare_representative,
+                                 synchronize_all);
     }
     if (is_masked_draft_backend(speculative_backend)) {
-        instantiate_graph_family(dflash_graphs, "DFlash", device, prepare_representative);
+        instantiate_graph_family(dflash_graphs, "DFlash", device, prepare_representative,
+                                 synchronize_all);
     }
 
     clear_stable_controls();
@@ -441,7 +468,7 @@ void ProgramImpl::prepare_graphs() {
                                    dflash->pending_features.bytes(), device.stream));
     }
     CUDA_CHECK(cudaMemsetAsync(token_counts.data, 0, token_counts.bytes(), device.stream));
-    device.synchronize();
+    synchronize_devices();
     for (std::uint32_t row = 0; row < max_concurrency; ++row) {
         if (!state_store->release(capture_states[row])) {
             throw std::logic_error("CUDA Graph capture StateImage could not be released");
