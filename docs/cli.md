@@ -211,6 +211,8 @@ The table lists executable defaults. The examples above select FP8 KV and MTP3.
 | `--prefill-chunk N` | positive text-prefill chunk, in multiples of 128 | `1024` |
 | `--max-new N` | requested output-token limit | `128` |
 | `--device N` | CUDA device index | `0` |
+| `--tp 1\|2` | tensor-parallel width; see [Two GPUs](#two-gpus) | `1` |
+| `--devices A,B` | one CUDA device per rank, rank 0 first; required with `--tp 2` | `--device` |
 | `--kv-dtype bf16\|int8\|fp8\|nvfp4\|k8v4` | KV-cache storage | `bf16` |
 | `--spec mtp\|dflash\|dflash2` | speculative backend | off |
 | `--draft-tokens N` | MTP `1..5`; DFlash/DFlash2 `1..15` | unset |
@@ -296,3 +298,24 @@ from this one-request interface; the persistent Engine and server routes own cro
 optional Host backing.
 
 All weight, sequence, workspace, and graph allocations are released when the Engine is destroyed.
+
+## Two GPUs
+
+`--tp 2 --devices A,B` splits a dense artifact across two GPUs of the same compute capability, for
+models whose weights do not fit one device (Qwen3.8-27B NVFP4 on two 16 GB boards):
+
+```bash
+./build/apps/ninfer models/qwen3_8_27b_nvfp4.ninfer --tp 2 --devices 0,1 \
+  --max-context 8192 --prompt "Quanto fa 17*23?"
+```
+
+Rank 0 runs on `A` and owns scheduling and sampling; `--device`, when given, must equal `A`.
+Attention heads, Gated DeltaNet heads, the MLP intermediate width and the output-head vocabulary
+are halved per rank, and every layer ends in two cross-device all-reduces. Each rank holds half of
+the KV cache and recurrent state, and both reserve the same runtime layout; `--kv-capacity auto`
+sizes it from the rank with less free memory. Direct peer access is used when the driver grants it;
+otherwise the transfers are staged through host memory, which is slower but equivalent.
+
+Tensor parallelism currently covers ordinary decoding of the dense architecture with `bf16` or
+`int8` KV. `--spec`, `--vision`, the MoE architecture and the `fp8`, `nvfp4` and `k8v4` KV types
+are rejected at startup.

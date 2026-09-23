@@ -452,6 +452,13 @@ void OperationalLog::engine_capacity(const GenerationService& service) const {
                   product::format_pretty_bytes(memory.runtime_reservation_bytes),
                   product::format_pretty_bytes(memory.available_after_startup_bytes));
 
+    if (engine.tp == 2) {
+        logger_->info("tensor parallel | tp 2 on devices {},{} | KV, StateImages and runtime "
+                      "reserved per rank | Host context-cache tiers off (rank 1 state has no "
+                      "Host replica)",
+                      engine.devices.at(0), engine.devices.at(1));
+    }
+
     if (cache.enabled) {
         logger_->info(
             "context cache | {} active + {} cached device states | host {} states, {} KV | "

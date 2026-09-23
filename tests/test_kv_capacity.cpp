@@ -1,5 +1,7 @@
 #include "runtime/engine/kv_capacity.h"
 
+#include <array>
+#include <cstddef>
 #include <iostream>
 #include <stdexcept>
 
@@ -50,6 +52,14 @@ int main() {
     } catch (const std::invalid_argument&) { insufficient_rejected = true; }
     failures += check(insufficient_rejected,
                       "automatic KV capacity accepted less than the minimum reservation");
+
+    // Two ranks share one page count sized by the tighter rank's own free memory.
+    const std::array<std::size_t, 2> rank_budgets{10000, 1360};
+    const auto symmetric = ninfer::runtime::resolve_kv_capacity_symmetric(
+        ninfer::KvCapacityPolicy::automatic(50), curve, rank_budgets);
+    failures += check(symmetric.main_page_groups == 4 && symmetric.resolved_tokens == 256 &&
+                          symmetric.available_after_weights_bytes == 1360,
+                      "symmetric KV capacity did not follow the tightest rank");
 
     if (failures == 0) { std::cout << "ok\n"; }
     return failures == 0 ? 0 : 1;

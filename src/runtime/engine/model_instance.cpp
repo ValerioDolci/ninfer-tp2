@@ -7,9 +7,12 @@
 
 #include <algorithm>
 #include <chrono>
+#include <limits>
+#include <memory>
 #include <set>
 #include <stdexcept>
 #include <utility>
+#include <vector>
 
 namespace ninfer::runtime {
 namespace {
@@ -57,13 +60,64 @@ void validate_options(const EngineOptions& options) {
     if (options.media_preprocess_threads > 64) {
         throw std::invalid_argument("Engine media_preprocess_threads must be in [0,64]");
     }
+    if (options.tp == 2) {
+        // Rejected before the artifact is read: the two-device schedule covers prefill and the
+        // ordinary decode round of the dense Text model only (models/qwen3_5/execution/text.h).
+        if (options.purpose != EnginePurpose::Generation) {
+            throw std::invalid_argument("Engine tp 2 does not support CausalScoring");
+        }
+        if (options.speculative.backend != SpeculativeBackend::None) {
+            throw std::invalid_argument(
+                "Engine tp 2 does not support speculative decoding (mtp, dflash, dflash2)");
+        }
+        if (options.enable_vision) {
+            throw std::invalid_argument("Engine tp 2 does not support Vision");
+        }
+        if (options.kv_cache != KvCacheStorage::BFloat16 &&
+            options.kv_cache != KvCacheStorage::Int8Group64) {
+            throw std::invalid_argument("Engine tp 2 supports only bf16 and int8 KV caches");
+        }
+        if (options.context_cache.host_state_slots != 0 ||
+            options.context_cache.host_kv_capacity_bytes != 0) {
+            throw std::invalid_argument(
+                "Engine tp 2 requires context_cache host_state_slots and host_kv_capacity_bytes "
+                "of 0: rank 1's KV and state have no Host tier");
+        }
+    }
 }
 
-std::size_t current_free_device_bytes() {
-    std::size_t free_bytes  = 0;
-    std::size_t total_bytes = 0;
-    CUDA_CHECK(cudaMemGetInfo(&free_bytes, &total_bytes));
+std::size_t free_device_bytes(int device) {
+    int previous = 0;
+    CUDA_CHECK(cudaGetDevice(&previous));
+    CUDA_CHECK(cudaSetDevice(device));
+    std::size_t free_bytes   = 0;
+    std::size_t total_bytes  = 0;
+    const cudaError_t status = cudaMemGetInfo(&free_bytes, &total_bytes);
+    CUDA_CHECK(cudaSetDevice(previous));
+    CUDA_CHECK(status);
     return free_bytes;
+}
+
+// The bottleneck rank's free bytes; one rank at width 1.
+std::size_t free_runtime_bytes(const DeviceContext& primary, const ExecutionContext* execution) {
+    std::size_t free_bytes = free_device_bytes(primary.device);
+    if (execution != nullptr) {
+        for (int rank = 1; rank < execution->tp; ++rank) {
+            free_bytes =
+                std::min(free_bytes,
+                         free_device_bytes(execution->dev[static_cast<std::size_t>(rank)]->device));
+        }
+    }
+    return free_bytes;
+}
+
+void synchronize_ranks(const DeviceContext& primary, const ExecutionContext* execution) {
+    if (execution != nullptr) {
+        for (int rank = 1; rank < execution->tp; ++rank) {
+            execution->dev[static_cast<std::size_t>(rank)]->synchronize();
+        }
+    }
+    primary.synchronize();
 }
 
 } // namespace
@@ -89,6 +143,21 @@ EngineOptions normalize_engine_options(EngineOptions options) {
         throw std::invalid_argument("Engine max_concurrency must be in [1,8]");
     }
 
+    if (options.tp != 1 && options.tp != 2) {
+        throw std::invalid_argument("Engine tp must be 1 or 2");
+    }
+    if (options.devices.empty()) {
+        if (options.tp != 1) {
+            throw std::invalid_argument("Engine tp 2 requires one device id per rank in devices");
+        }
+        options.devices = {options.device};
+    }
+    if (options.devices.size() != static_cast<std::size_t>(options.tp) ||
+        options.devices.front() != options.device) {
+        throw std::invalid_argument(
+            "Engine devices must list one id per tensor-parallel rank, starting with device");
+    }
+
     ContextCacheOptions& cache      = options.context_cache;
     const std::uint32_t concurrency = options.max_concurrency;
     if (!cache.enabled) {
@@ -108,8 +177,14 @@ EngineOptions normalize_engine_options(EngineOptions options) {
         return options;
     }
 
-    cache.device_state_slots            = cache.device_state_slots.value_or(concurrency);
-    const std::uint64_t default_private = 2ULL * concurrency;
+    // At tp 2 the Host tiers are off, so every endpoint, rewrite and anchor checkpoint must fit
+    // in Device StateImages: with one extra slot a long prompt's anchors evict its own endpoint.
+    const std::uint32_t minimum_device_states = options.tp == 2 ? 4U : 0U;
+    const std::uint32_t minimum_private       = options.tp == 2 ? 8U : 0U;
+    cache.device_state_slots =
+        cache.device_state_slots.value_or(std::max(concurrency, minimum_device_states));
+    const std::uint64_t default_private =
+        std::max<std::uint64_t>(2ULL * concurrency, minimum_private);
     cache.max_private_continuations =
         cache.max_private_continuations.value_or(static_cast<std::uint32_t>(default_private));
     cache.max_shared_prefixes = cache.max_shared_prefixes.value_or(
@@ -141,6 +216,10 @@ EngineOptions normalize_engine_options(EngineOptions options) {
 ModelInstance::ModelInstance(std::unique_ptr<models::qwen3_5::Model> source,
                              const EngineOptions& options)
     : model(std::move(source)), parameters(*model),
+      peer_parameters(
+          model->device_count() == 2
+              ? std::make_unique<const models::qwen3_5::execution::Parameters>(*model, 1)
+              : nullptr),
       frontend(models::qwen3_5::make_frontend(
           model->resources(), {.chat_template_path       = options.chat_template_path,
                                .architecture             = model->config().text.architecture,
@@ -153,8 +232,15 @@ ModelInstance::ModelInstance(std::unique_ptr<models::qwen3_5::Model> source,
 
 ModelInstance::~ModelInstance() = default;
 
-ConstructedModel construct_model(const EngineOptions& options, DeviceContext& device) {
+namespace {
+
+// `execution` is null at tensor-parallel width 1, where `device` is the only device.
+ConstructedModel construct_model_on(const EngineOptions& options, DeviceContext& device,
+                                    ExecutionContext* execution) {
     validate_options(options);
+    if ((execution != nullptr) != (options.tp == 2)) {
+        throw std::logic_error("Engine execution context does not match the tensor-parallel width");
+    }
     const auto start = Clock::now();
     StartupPhaseScope inspect(options.startup_observer, StartupPhase::ArtifactInspect);
     artifact::Reader reader(options.artifact_path);
@@ -162,11 +248,17 @@ ConstructedModel construct_model(const EngineOptions& options, DeviceContext& de
     StartupPhaseScope binding(options.startup_observer, StartupPhase::TargetPlan);
     auto plan = models::qwen3_5::plan_load(reader, models::load_options(options));
     binding.complete();
-    auto model =
-        models::qwen3_5::materialize_model(std::move(plan), device, &options.startup_observer);
-    device.synchronize();
+    auto model = execution != nullptr
+                     ? models::qwen3_5::materialize_model(std::move(plan), *execution,
+                                                          &options.startup_observer)
+                     : models::qwen3_5::materialize_model(std::move(plan), device,
+                                                          &options.startup_observer);
+    synchronize_ranks(device, execution);
     StartupPhaseScope frontend(options.startup_observer, StartupPhase::FrontendInitialize);
     auto instance = std::make_unique<ModelInstance>(std::move(model), options);
+    if ((execution != nullptr) != (instance->peer_parameters != nullptr)) {
+        throw std::logic_error("loaded Model device count does not match the Engine tp");
+    }
     frontend.complete();
     StartupPhaseScope planning(options.startup_observer, StartupPhase::TargetFinalize);
     const auto signature = models::qwen3_5::prefill_signature(*instance->model);
@@ -175,10 +267,19 @@ ConstructedModel construct_model(const EngineOptions& options, DeviceContext& de
                 context_cost_hardware_class(device.props.name, device.props.major, device.props.minor),
             .prefill_signature = signature},
         options.context_cost.preset_path);
-    auto planner    = models::qwen3_5::make_sequence_planner(instance->parameters, device, options);
-    auto resolution = resolve_kv_capacity(options.kv_capacity, planner.capacity_curve(),
-                                          current_free_device_bytes());
-    auto sequence   = std::move(planner).finalize(resolution.main_page_groups);
+    auto planner = models::qwen3_5::make_sequence_planner(instance->parameters, device, options);
+    // Every rank reserves the same per-rank layout and addresses the same KV pages, so one page
+    // count is resolved against the tightest rank's own free memory.
+    std::vector<std::size_t> rank_budgets{free_device_bytes(device.device)};
+    if (execution != nullptr) {
+        for (int rank = 1; rank < execution->tp; ++rank) {
+            rank_budgets.push_back(
+                free_device_bytes(execution->dev[static_cast<std::size_t>(rank)]->device));
+        }
+    }
+    auto resolution =
+        resolve_kv_capacity_symmetric(options.kv_capacity, planner.capacity_curve(), rank_budgets);
+    auto sequence = std::move(planner).finalize(resolution.main_page_groups);
     if (sequence.device_reservation_bytes() != resolution.runtime_reservation_bytes ||
         sequence.kv_capacity() != resolution.resolved_tokens) {
         throw std::logic_error("resolved KV capacity does not match the finalized Program plan");
@@ -186,11 +287,17 @@ ConstructedModel construct_model(const EngineOptions& options, DeviceContext& de
     instance->kv_capacity_resolution = resolution;
     planning.complete();
     StartupPhaseScope program(options.startup_observer, StartupPhase::ProgramInitialize);
-    instance->program = models::qwen3_5::create_program(instance->parameters, std::move(sequence),
-                                                        device, options.startup_observer);
-    device.synchronize();
+    instance->program =
+        execution != nullptr
+            ? models::qwen3_5::create_program(instance->parameters, *instance->peer_parameters,
+                                              std::move(sequence), *execution,
+                                              options.startup_observer)
+            : models::qwen3_5::create_program(instance->parameters, std::move(sequence), device,
+                                              options.startup_observer);
+    synchronize_ranks(device, execution);
     program.complete();
-    instance->kv_capacity_resolution.available_after_startup_bytes = current_free_device_bytes();
+    instance->kv_capacity_resolution.available_after_startup_bytes =
+        free_runtime_bytes(device, execution);
     const auto& stats = instance->model->storage_stats();
     LoadSummary summary;
     summary.architecture = models::architecture_name(instance->model->config().text.architecture);
@@ -211,15 +318,34 @@ ConstructedModel construct_model(const EngineOptions& options, DeviceContext& de
     summary.device_object_count  = stats.device_object_count;
     summary.host_object_count    = stats.host_object_count;
     for (int i = 0; i < stats.device_count; ++i) {
-        const auto device = static_cast<std::size_t>(i);
-        summary.devices.push_back({.capacity_bytes       = stats.per_device_capacity_bytes[device],
-                                   .host_to_device_bytes = stats.per_device_h2d_bytes[device],
-                                   .sharded_bytes        = stats.sharded_bytes[device],
-                                   .replicated_bytes     = stats.replicated_bytes[device],
-                                   .local_bytes          = stats.local_bytes[device]});
+        const auto rank = static_cast<std::size_t>(i);
+        summary.devices.push_back(
+            {.device         = execution != nullptr ? execution->dev[rank]->device : device.device,
+             .capacity_bytes = stats.per_device_capacity_bytes[rank],
+             .host_to_device_bytes = stats.per_device_h2d_bytes[rank],
+             .sharded_bytes        = stats.sharded_bytes[rank],
+             .replicated_bytes     = stats.replicated_bytes[rank],
+             .local_bytes          = stats.local_bytes[rank]});
     }
     summary.context_cost         = std::move(context_cost.summary);
     return {std::move(instance), std::move(summary), std::move(context_cost.model)};
+}
+
+} // namespace
+
+ConstructedModel construct_model(const EngineOptions& options, DeviceContext& device) {
+    if (options.tp != 1) {
+        throw std::invalid_argument("single-device Engine construction requires tp 1");
+    }
+    return construct_model_on(options, device, nullptr);
+}
+
+ConstructedModel construct_model(const EngineOptions& options, ExecutionContext& execution) {
+    if (execution.tp != options.tp || !execution.dev[0]) {
+        throw std::invalid_argument("Engine execution context does not match options.tp");
+    }
+    return construct_model_on(options, execution.primary(),
+                              execution.tp == 1 ? nullptr : &execution);
 }
 
 } // namespace ninfer::runtime

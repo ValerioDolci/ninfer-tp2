@@ -543,6 +543,25 @@ ResourceManager 与完成所有 request response。内部不变量错误不能�
 Prefill 成本按硬件类别与实际 Text/Vision 配置、绑定、Use 派生的 `prefill_signature` 选择测量值，
 没有匹配值时使用通用成本。成本用于规划选择，物理可行性仍由 Program 的实际布局与占用决定。
 
+### 8.1 双 GPU 张量并行
+
+`EngineOptions.tp = 2` 时 Engine 为 `devices` 中的每个 rank 建立一个 `DeviceContext`，组成
+`ExecutionContext`，并在驱动允许时启用 peer access（否则 collectives 经 host staging 复制）。
+加载得到一个双设备 Model；`ModelInstance` 持有 rank 0 与 rank 1 的 `execution::Parameters`。
+Scheduler、ResourceManager、admission、sampling 和 request 输出仍然只在 rank 0，Engine 语义与单卡相同。
+
+Program 只有一套逻辑 store（KV address space、page、StateImage、catalog），由 rank 0 持有。
+rank 1 在 `ProgramImpl::PeerRuntime` 中分配与 rank 0 相同的 per-rank persistent/workspace 布局
+（KV heads、GDN channels 与 value heads 减半），其 KV page pool、execution tables 与 StateImage pool
+在构造时作为 rank 0 pool 的 mirror 挂接：rank 0 的每次 page zero/copy、row acquire/release/publish
+与 slot zero/copy 在 rank 1 的 stream 上以相同物理索引重放。Host tier 没有 rank 1 副本，因此 tp 2
+要求 Host State 与 Host KV 容量为 0。每次 bind 与 prefill step 都在两个 rank 上发布同一个 prefill
+KV row；ordinary decode 把同一个 host ingress 上传到两个 rank 的 frame。CUDA Graph 把 rank 1 的
+stream fork/join 进 rank 0 的同一次 capture，launch 前以 rank 1 已提交的 mirror 工作为 gate。
+两个 rank 保留相同的 runtime reservation，KV 容量按空闲显存较少的 rank 求解。当前只支持 dense
+架构的 ordinary 生成与 `bf16`/`int8` KV；speculative、Vision、CausalScoring 与 MoE 在启动时拒绝，
+完全命中缓存（zero-suffix）的 reuse 候选在 admission 中放弃，改为从更早的 checkpoint prefill。
+
 Serve warmup 使用同一个公共 Engine 执行路径，但其 request-level context cache 固定关闭。Warmup 可以建立
 CUDA Graph、library 和 allocator 的运行时状态，结束后不得留下可供外部请求命中的 continuation 或占用
 checkpoint catalog。
