@@ -92,11 +92,15 @@ struct MtpBatchContext {
 struct DFlashBatchContext {
     ExecutionCore execution;
     const qwen3_5::PagedKVCache& text_cache;
-    DFlashPersistentState& dflash;
+    DFlashPersistentState& dflash; // Rank 0's; rank 1 holds no drafter state.
     qwen3_5::DFlashDecodeState& frame;
     const qwen3_5::DFlashDecodeIngress& host_ingress;
     qwen3_5::DFlashDecodeEgress& host_egress;
     Tensor& continuation_hidden_store;
+    // Tensor-parallel width 2 only: rank 1's frame, which receives the same host ingress record
+    // and rank 0's draft tokens, and rank 1's continuation hidden store.
+    qwen3_5::DFlashDecodeState* peer_frame = nullptr;
+    Tensor* peer_continuation_hidden_store = nullptr;
 };
 
 struct DFlashAppendContext {
@@ -149,9 +153,11 @@ void target_verify_accept(ExecutionCore& execution, Tensor& continuation_hidden_
                           TextContext& card, TargetVerifyFrameView frame,
                           ops::CausalAttentionExecutionEnvelope envelope);
 // Tensor-parallel width 2: both ranks verify their halves of the model, each with its own frame
-// view and ReplaySSM records. Acceptance runs on rank 0 alone over the gathered logits; its
-// accepted-draft counts are copied to rank 1, and both ranks select and publish their accepted
-// hidden. `peer.replay_records` are rank 1's; feature capture is not supported.
+// view and ReplaySSM records. Acceptance (greedy, or sparse over `frame`'s proposal distribution)
+// runs on rank 0 alone over the gathered logits; its accepted-draft counts are copied to rank 1,
+// and both ranks select and publish their accepted hidden. `peer.replay_records` are rank 1's.
+// Only `frame` may carry a DFlash feature sink, which captures rank 0's replicated residual; `peer`
+// carries no sink and no proposal distribution.
 void target_verify_accept(ExecutionCore& execution, Tensor& continuation_hidden_store,
                           TextContext& card, TargetVerifyFrameView frame,
                           TargetVerifyFrameView peer, Tensor& peer_continuation_hidden_store,
