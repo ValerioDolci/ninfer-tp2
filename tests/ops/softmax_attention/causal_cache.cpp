@@ -2,6 +2,7 @@
 #include "core/paged_kv_cache.h"
 #include "ninfer/ops/kv_cache_append.h"
 #include "ninfer/ops/softmax_attention.h"
+#include "ops/attention_criteria.h"
 #include "ops/op_tester.h"
 #include "ops/softmax_attention/oracle.h"
 
@@ -37,38 +38,6 @@ constexpr std::int32_t kNvfp4QuantGroups = kHeadDim / kNvfp4QuantGroup;
 constexpr std::int32_t kNvfp4CodeBytes   = kHeadDim / 2;
 constexpr float kAttentionScale          = 0.0625f;
 constexpr std::uint16_t kOutputCanary    = 0x7fc1u;
-
-// A1 and A3 use one fixed criterion for each registered storage profile; token count, geometry,
-// execution envelope, and private launch route do not select or relax it.
-constexpr ReductionCriterion kAttentionBf16Criterion{
-    /*relative_l2*/ 2.8e-3,
-    /*gross_absolute*/ 1.0e-3,
-    /*gross_relative_to_max_reference*/ 2.7e-3,
-};
-
-constexpr ReductionCriterion kAttentionInt8Criterion{
-    /*relative_l2*/ 3.15e-3,
-    /*gross_absolute*/ 1.1e-3,
-    /*gross_relative_to_max_reference*/ 3.0e-3,
-};
-
-constexpr ReductionCriterion kAttentionFp8Criterion{
-    /*relative_l2*/ 1.2e-2,
-    /*gross_absolute*/ 4.0e-3,
-    /*gross_relative_to_max_reference*/ 9.0e-3,
-};
-
-constexpr ReductionCriterion kAttentionNvfp4Criterion{
-    /*relative_l2*/ 1.5e-2,
-    /*gross_absolute*/ 5.0e-3,
-    /*gross_relative_to_max_reference*/ 1.1e-2,
-};
-
-constexpr ReductionCriterion kAttentionK8V4Criterion{
-    /*relative_l2*/ 1.5e-2,
-    /*gross_absolute*/ 5.0e-3,
-    /*gross_relative_to_max_reference*/ 1.1e-2,
-};
 
 struct TestVectorLayout {
     DType code_dtype;
@@ -1652,15 +1621,6 @@ const char* cache_name(KvCacheStorage storage) {
         return "k8v4";
     }
     return "unknown";
-}
-
-ReductionCriterion attention_criterion(KvCacheStorage storage) {
-    if (storage == KvCacheStorage::BFloat16) return kAttentionBf16Criterion;
-    if (storage == KvCacheStorage::Int8Group64) return kAttentionInt8Criterion;
-    if (storage == KvCacheStorage::Fp8E4M3Row256) return kAttentionFp8Criterion;
-    if (storage == KvCacheStorage::Nvfp4Group16) return kAttentionNvfp4Criterion;
-    if (storage == KvCacheStorage::Fp8KeyNvfp4Value) return kAttentionK8V4Criterion;
-    throw std::logic_error("unregistered causal-attention test storage");
 }
 
 int verify_attention(const std::string& label, const std::vector<double>& actual,
