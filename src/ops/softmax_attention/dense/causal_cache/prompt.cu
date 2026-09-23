@@ -10,6 +10,7 @@
 #include "core/device.h" // CUDA_CHECK
 
 #include <cstdint>
+#include <stdexcept>
 
 namespace ninfer::ops::detail {
 namespace {
@@ -86,8 +87,13 @@ void causal_attention_prompt_attention_launch(const Tensor& q, const Tensor& pos
                                                                        metadata, out, stream);
         return;
     }
-    causal_attention_prompt_attention_launch_for<CausalD256H16Kv2>(q, positions, scale, cache,
-                                                                   metadata, out, stream);
+    if (q.ne[1] == CausalD256H16Kv2::QHeads) {
+        causal_attention_prompt_attention_launch_for<CausalD256H16Kv2>(q, positions, scale, cache,
+                                                                       metadata, out, stream);
+        return;
+    }
+    throw std::invalid_argument(
+        "causal_attention_prompt_attention_launch: unsupported head geometry");
 }
 
 void causal_attention_prompt_launch(const Tensor& q, const Tensor& k, const Tensor& v,
@@ -128,8 +134,12 @@ void causal_attention_prompt_launch(const Tensor& q, const Tensor& k, const Tens
                 q, positions, scale, cache, metadata, out, stream);
             return;
         }
-        causal_attention_prompt_attention_launch_for<CausalD256H16Kv2>(q, positions, scale, cache,
-                                                                       metadata, out, stream);
+        if (q.ne[1] == CausalD256H16Kv2::QHeads) {
+            causal_attention_prompt_attention_launch_for<CausalD256H16Kv2>(
+                q, positions, scale, cache, metadata, out, stream);
+            return;
+        }
+        throw std::invalid_argument("causal_attention_prompt_launch: unsupported head geometry");
     };
     if (valid_columns.data == nullptr) {
         launch.template operator()<false>();

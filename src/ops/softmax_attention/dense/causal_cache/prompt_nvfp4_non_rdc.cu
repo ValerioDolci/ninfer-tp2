@@ -7,6 +7,7 @@
 #include "ops/softmax_attention/dense/causal_cache/prompt_nvfp4.cuh"
 
 #include <cstdint>
+#include <stdexcept>
 
 namespace ninfer::ops::detail {
 namespace {
@@ -40,7 +41,11 @@ void dispatch(const Tensor& q, const Tensor& positions, float scale, const Cache
         launch_for<CausalD256H24Kv4>(q, positions, scale, cache, metadata, out, stream);
         return;
     }
-    launch_for<CausalD256H16Kv2>(q, positions, scale, cache, metadata, out, stream);
+    if (q.ne[1] == CausalD256H16Kv2::QHeads) {
+        launch_for<CausalD256H16Kv2>(q, positions, scale, cache, metadata, out, stream);
+        return;
+    }
+    throw std::invalid_argument("causal_attention_prompt_nvfp4: unsupported head geometry");
 }
 
 } // namespace

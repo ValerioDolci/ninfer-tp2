@@ -196,9 +196,13 @@ void causal_attention_small_t_fp8_launch(
             partial_l, out, stream);
         return;
     }
-    causal_attention_small_t_fp8_launch_for<CausalD256H16Kv2>(q, input, positions, scale, cache,
-                                                              invocation, envelope, partial_acc,
-                                                              partial_m, partial_l, out, stream);
+    if (q.ne[1] == CausalD256H16Kv2::QHeads) {
+        causal_attention_small_t_fp8_launch_for<CausalD256H16Kv2>(
+            q, input, positions, scale, cache, invocation, envelope, partial_acc, partial_m,
+            partial_l, out, stream);
+        return;
+    }
+    throw std::invalid_argument("causal_attention_small_t_fp8_launch: unsupported head geometry");
 }
 
 void causal_attention_cached_small_t_fp8_launch(const Tensor& q, const Tensor& positions,
@@ -223,9 +227,14 @@ void causal_attention_cached_small_t_fp8_launch(const Tensor& q, const Tensor& p
             partial_l, out, stream);
         return;
     }
-    causal_attention_small_t_fp8_launch_for<CausalD256H16Kv2>(
-        q, input, positions, scale, batch_cache, invocation, envelope, partial_acc, partial_m,
-        partial_l, out, stream);
+    if (q.ne[1] == CausalD256H16Kv2::QHeads) {
+        causal_attention_small_t_fp8_launch_for<CausalD256H16Kv2>(
+            q, input, positions, scale, batch_cache, invocation, envelope, partial_acc, partial_m,
+            partial_l, out, stream);
+        return;
+    }
+    throw std::invalid_argument(
+        "causal_attention_cached_small_t_fp8_launch: unsupported head geometry");
 }
 
 } // namespace ninfer::ops::detail

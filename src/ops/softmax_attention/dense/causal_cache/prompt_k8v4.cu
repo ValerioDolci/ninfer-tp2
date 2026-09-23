@@ -8,6 +8,7 @@
 #include "ops/softmax_attention/dense/causal_cache/prompt_k8v4.cuh"
 
 #include <cstdint>
+#include <stdexcept>
 
 namespace ninfer::ops::detail {
 namespace {
@@ -46,8 +47,12 @@ void causal_attention_prompt_k8v4_attention_dispatch(const Tensor& q, const Tens
             q, positions, scale, cache, metadata, out, stream);
         return;
     }
-    causal_attention_prompt_k8v4_attention_launch_for<CausalD256H16Kv2>(q, positions, scale, cache,
-                                                                        metadata, out, stream);
+    if (q.ne[1] == CausalD256H16Kv2::QHeads) {
+        causal_attention_prompt_k8v4_attention_launch_for<CausalD256H16Kv2>(
+            q, positions, scale, cache, metadata, out, stream);
+        return;
+    }
+    throw std::invalid_argument("causal_attention_prompt_k8v4: unsupported head geometry");
 }
 
 } // namespace
