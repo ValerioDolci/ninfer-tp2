@@ -33,6 +33,13 @@ std::uint32_t normalized_private_capacity(const ContextCacheOptions& options) {
     return *options.max_private_continuations;
 }
 
+// Both ranks of a tensor-parallel Program start from zeroed persistent and workspace arenas, so
+// the two ranks' KV pages, StateImages and scratch hold identical bytes before their first
+// write. A single-device Program's arenas start undefined, as every owner fills what it reads.
+ZeroFill tensor_parallel_zero_fill(const SequencePlanImpl& plan) noexcept {
+    return plan.peer_persistent ? ZeroFill::Yes : ZeroFill::No;
+}
+
 } // namespace
 
 const PersistentLayout& ProgramImpl::PeerRuntime::layout(const SequencePlanImpl& plan) {
@@ -44,8 +51,8 @@ const PersistentLayout& ProgramImpl::PeerRuntime::layout(const SequencePlanImpl&
 }
 
 ProgramImpl::PeerRuntime::PeerRuntime(DeviceContext& peer_device, const SequencePlanImpl& plan)
-    : device(peer_device), persistent(layout(plan).bytes),
-      workspace_storage(plan.workspace.capacity),
+    : device(peer_device), persistent(layout(plan).bytes, ZeroFill::Yes),
+      workspace_storage(plan.workspace.capacity, ZeroFill::Yes),
       work(DeviceSpan{workspace_storage.base(), plan.workspace.general_capacity}) {
     const PersistentLayout& own = layout(plan);
     const DeviceSpan backing    = persistent.alloc_bytes(own.bytes, 256);
@@ -81,7 +88,8 @@ ProgramImpl::ProgramImpl(const execution::Parameters& parameters_in, const Seque
       use_cuda_graph(plan.use_cuda_graph), causal_scoring(plan.causal_scoring),
       kv_payload_bytes(plan.persistent.kv_payload_bytes),
       graph_allowance_bytes(plan.graph_allowance_bytes), workspace_plan(plan.workspace),
-      persistent(plan.persistent.bytes), workspace_storage(plan.workspace.capacity),
+      persistent(plan.persistent.bytes, tensor_parallel_zero_fill(plan)),
+      workspace_storage(plan.workspace.capacity, tensor_parallel_zero_fill(plan)),
       work(DeviceSpan{workspace_storage.base(), plan.workspace.general_capacity}),
       continuation_states(continuation_capacity), continuation_slots(continuation_capacity),
       shared_prefix_states(shared_prefix_capacity), shared_prefix_slots(shared_prefix_capacity),
