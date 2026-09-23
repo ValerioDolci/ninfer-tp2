@@ -117,17 +117,23 @@ std::size_t free_device_bytes(int device) {
     return free_bytes;
 }
 
-// The bottleneck rank's free bytes; one rank at width 1.
-std::size_t free_runtime_bytes(const DeviceContext& primary, const ExecutionContext* execution) {
-    std::size_t free_bytes = free_device_bytes(primary.device);
+// Each rank's free device bytes, indexed by rank; one rank at width 1.
+std::vector<std::size_t> rank_free_bytes(const DeviceContext& primary,
+                                         const ExecutionContext* execution) {
+    std::vector<std::size_t> free_bytes{free_device_bytes(primary.device)};
     if (execution != nullptr) {
         for (int rank = 1; rank < execution->tp; ++rank) {
-            free_bytes =
-                std::min(free_bytes,
-                         free_device_bytes(execution->dev[static_cast<std::size_t>(rank)]->device));
+            free_bytes.push_back(
+                free_device_bytes(execution->dev[static_cast<std::size_t>(rank)]->device));
         }
     }
     return free_bytes;
+}
+
+// The bottleneck rank's free bytes.
+std::size_t free_runtime_bytes(const DeviceContext& primary, const ExecutionContext* execution) {
+    const auto free_bytes = rank_free_bytes(primary, execution);
+    return *std::min_element(free_bytes.begin(), free_bytes.end());
 }
 
 void synchronize_ranks(const DeviceContext& primary, const ExecutionContext* execution) {
@@ -307,14 +313,9 @@ ConstructedModel construct_model_on(const EngineOptions& options, DeviceContext&
     // count is resolved against the tightest rank's own free memory. A rank that allocates less
     // than that layout (the rank without the Vision tower skips its encode workspace) is credited
     // with the difference, so only the tower's rank pays for it.
-    std::vector<std::size_t> rank_budgets{free_device_bytes(device.device) +
-                                          planner.unallocated_reservation_bytes(0)};
-    if (execution != nullptr) {
-        for (int rank = 1; rank < execution->tp; ++rank) {
-            rank_budgets.push_back(
-                free_device_bytes(execution->dev[static_cast<std::size_t>(rank)]->device) +
-                planner.unallocated_reservation_bytes(rank));
-        }
+    auto rank_budgets = rank_free_bytes(device, execution);
+    for (std::size_t rank = 0; rank < rank_budgets.size(); ++rank) {
+        rank_budgets[rank] += planner.unallocated_reservation_bytes(static_cast<int>(rank));
     }
     auto resolution =
         resolve_kv_capacity_symmetric(options.kv_capacity, planner.capacity_curve(), rank_budgets);
