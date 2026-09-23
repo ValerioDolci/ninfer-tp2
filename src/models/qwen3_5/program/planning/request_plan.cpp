@@ -536,17 +536,6 @@ std::optional<AdmissionCandidate> ProgramImpl::inspect_lane(
         }
     }
 
-    if (tensor_parallel() && plan->reuse != ReusePath::Root) {
-        // A zero-suffix reuse samples its first token from the retained hidden
-        // (sample_from_hidden), which has no vocabulary-split head, and the speculative bridges
-        // resume a draft head from a hidden only rank 0 holds. Declining costs one prefill from
-        // an earlier checkpoint or the root instead of a failed request.
-        if (plan->reuse_base >= plan->summary.prompt_tokens ||
-            speculative_backend != SpeculativeBackend::None) {
-            return std::nullopt;
-        }
-    }
-
     if (speculative_backend == SpeculativeBackend::Mtp) {
         const bool append_ready =
             plan->reuse == ReusePath::PrivateEndpoint && source != nullptr &&
