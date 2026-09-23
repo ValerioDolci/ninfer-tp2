@@ -413,23 +413,32 @@ void ProgramImpl::prepare_graphs() {
         const auto batch_one_profiles =
             dflash_graph_profiles(speculative_backend, capacity, draft_window, 1);
         validate_graph_profiles(batch_one_profiles, capacity - 1, "DFlash");
-        execution::DFlashBatchContext dflash_state{execution_core(),
-                                                   decoder->text_kv,
-                                                   *dflash,
-                                                   *io.dflash_decode,
-                                                   *dflash_host_ingress,
-                                                   *dflash_host_egress,
-                                                   state_images->continuation_hidden_store()};
+        execution::DFlashBatchContext dflash_state{
+            execution_core(),
+            decoder->text_kv,
+            *dflash,
+            *io.dflash_decode,
+            *dflash_host_ingress,
+            *dflash_host_egress,
+            state_images->continuation_hidden_store(),
+            peer ? &*peer->io.dflash_decode : nullptr,
+            peer ? &peer->state_images->continuation_hidden_store() : nullptr};
         const GraphExecutionProfile code_warm = batch_one_profiles.front();
         const ops::CausalAttentionExecutionEnvelope code_warm_target{
             1, static_cast<std::uint32_t>(std::min<std::uint64_t>(
                    capacity, static_cast<std::uint64_t>(code_warm.max) + draft_window + 1ULL))};
-        prepare_representative(code_warm.min, 1);
-        device.synchronize();
-        execution::dflash_decode_batch(dflash_state, 1, draft_window,
-                                       dflash_envelopes(code_warm.min, code_warm.max, draft_window),
-                                       code_warm_target, nullptr);
-        device.synchronize();
+        // As for ordinary and MTP rounds: every batch size is warmed eagerly on both devices at
+        // tp 2 before any capture, since batch shape selects kernels.
+        const std::uint32_t warm_batches = tensor_parallel() ? max_concurrency : 1U;
+        for (std::uint32_t batch_size = 1; batch_size <= warm_batches; ++batch_size) {
+            prepare_representative(code_warm.min, batch_size);
+            synchronize_all();
+            execution::dflash_decode_batch(
+                dflash_state, static_cast<std::int32_t>(batch_size), draft_window,
+                dflash_envelopes(code_warm.min, code_warm.max, draft_window), code_warm_target,
+                nullptr);
+            synchronize_all();
+        }
 
         dflash_graphs.profiles.reserve(batch_one_profiles.size() * max_concurrency);
         for (std::uint32_t batch_size = 1; batch_size <= max_concurrency; ++batch_size) {
