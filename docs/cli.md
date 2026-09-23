@@ -316,6 +316,7 @@ the KV cache and recurrent state, and both reserve the same runtime layout; `--k
 sizes it from the rank with less free memory. Direct peer access is used when the driver grants it;
 otherwise the transfers are staged through host memory, which is slower but equivalent.
 
-Tensor parallelism currently covers ordinary decoding of the dense architecture with `bf16` or
-`int8` KV. `--spec`, `--vision`, the MoE architecture and the `fp8`, `nvfp4` and `k8v4` KV types
-are rejected at startup.
+Tensor parallelism covers ordinary decoding and `--spec mtp` of the dense architecture with `bf16`
+or `int8` KV. The MTP head is split like a Text layer and verification runs on both ranks;
+`--draft-tokens` and `--lm-head-draft` work as on one GPU. `--spec dflash|dflash2`, `--vision`,
+the MoE architecture and the `fp8`, `nvfp4` and `k8v4` KV types are rejected at startup.
