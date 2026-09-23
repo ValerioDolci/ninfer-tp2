@@ -848,11 +848,13 @@ work as on one GPU.
 Rank 1 has no Host copy of its KV or state, so the Host tiers are off: an omitted
 `--host-state-slots` or `--host-kv-mib` becomes `0`, and a nonzero value is rejected. Every
 checkpoint therefore lives in a Device StateImage, and the defaults raise the Device checkpoint pool
-and the private catalog to `max(2 * max-concurrency, 8)`. Without a Host tier, a checkpoint captured
-during prefill (the turn-closure point a follow-up turn resumes from, a long-prompt anchor, the
-implicit shared prefix) is skipped when the Device pool is full, so after enough earlier
-conversations have filled it, a new conversation's next turn re-prefills its whole prompt. Each
-extra slot costs one StateImage per rank (about 73 MiB for Qwen3.8-27B); agentic or
+and the private catalog to `max(2 * max-concurrency, 8)`. Without a Host tier, a private checkpoint
+captured during prefill (the turn-closure point a follow-up turn resumes from, a long-prompt anchor)
+that finds the Device pool full first releases idle retained conversations without a live session,
+least valuable and oldest first, until it fits; each release counts as a private eviction. A capture
+that still does not fit is skipped, and that conversation's next turn re-prefills from an earlier
+checkpoint or its whole prompt. The same reclaim applies on one GPU with `--host-state-slots 0`.
+Each extra slot costs one StateImage per rank (about 73 MiB for Qwen3.8-27B); agentic or
 multi-conversation servers should set `--device-state-slots 12` to `16`. The startup log prints one
 line per rank and a `tensor parallel` capacity line with the Device checkpoint pool and the
 transfer path: `p2p on` when the driver grants direct peer access, `p2p off (host-staged copies)`

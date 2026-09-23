@@ -73,7 +73,10 @@ public:
                      options.context_cache.max_shared_prefixes.value(),
                      options.context_cache.enabled,
                      options.context_cache.max_long_anchors_per_continuation.value_or(0),
-                     std::move(context_cost)) {
+                     std::move(context_cost),
+                     // Without a Host StateImage tier (always at tp 2) a prefill checkpoint has
+                     // nowhere to go when the Device pool is full.
+                     options.context_cache.host_state_slots == 0) {
         if (max_concurrency_ == 0 || max_concurrency_ > kMaximumConcurrency ||
             options.max_pending_requests == 0 || pending_timeout_.count() <= 0) {
             throw std::invalid_argument("Engine core bounds are invalid");

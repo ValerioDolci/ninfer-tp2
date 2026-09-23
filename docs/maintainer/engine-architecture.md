@@ -562,7 +562,8 @@ rank 1 的 stream fork/join 进 rank 0 的同一次 capture，launch 前以 rank
 ordinary、MTP 与 DFlash2（需 `--lm-head-draft`；drafter 只在 rank 0 运行）生成，KV 为 `bf16`/`int8`；
 DFlash、Vision、CausalScoring 与 MoE 在启动时拒绝。Prefix reuse 与单卡相同，包括 zero-suffix 与 MTP
 bridge：MTP 下 rank 1 在同一 StateImage slot 保留自己的 target hidden 副本，zero-suffix 的首个 token
-经词表切分的 output head 采样。
+经词表切分的 output head 采样。没有 Host 层时 private prefill capture 的回收规则见
+[资源调度与上下文缓存](resource-scheduling-and-context-cache.md#101-retention-policy)。
 
 Serve warmup 使用同一个公共 Engine 执行路径，但其 request-level context cache 固定关闭。Warmup 可以建立
 CUDA Graph、library 和 allocator 的运行时状态，结束后不得留下可供外部请求命中的 continuation 或占用

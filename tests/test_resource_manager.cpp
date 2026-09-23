@@ -994,6 +994,10 @@ public:
                                                         bool permit_shared_publication) const {
         FakeCaptureAssessment assessment = capture_assessment;
         if (!permit_shared_publication) { assessment.publishes_shared = false; }
+        if (capture_feasible_after_releases &&
+            released_continuations.size() >= *capture_feasible_after_releases) {
+            assessment.physically_feasible = true;
+        }
         return assessment;
     }
 
@@ -1158,6 +1162,8 @@ public:
     std::uint32_t reported_shared_active_references      = 0;
     ContextTransactionStatus capture_status              = ContextTransactionStatus::Published;
     FakeCaptureAssessment capture_assessment;
+    // The Device State pool frees enough for the capture after this many released continuations.
+    std::optional<std::size_t> capture_feasible_after_releases;
     FakeContinuationSummary capture_summary;
     FakePhysicalUsage usage;
 
@@ -2872,6 +2878,55 @@ void test_in_progress_adoption_and_private_capture() {
     (void)finish_active(manager, program, active, 24);
 }
 
+// Without a Host State tier a full Device pool must not silently drop every new conversation's
+// turn-closure capture: the oldest idle private continuation is released to make room, and only
+// when the reclaim is enabled, which the Engine does for zero host_state_slots at any tp.
+void test_hostless_private_capture_reclaims_oldest_idle_continuation() {
+    for (const bool reclaim : {false, true}) {
+        FakeManager manager(1, 3, 0, true, 2, test_cost_model(), reclaim);
+        FakeProgram program;
+        const ActiveRequest oldest = start_active(manager, program, 51, make_base(51), 1);
+        (void)finish_active(manager, program, oldest);
+        const ActiveRequest newer = start_active(manager, program, 52, make_base(52), 2);
+        (void)finish_active(manager, program, newer);
+        const ActiveRequest active = start_active(manager, program, 53, make_base(53), 3);
+
+        program.capture_assessment = FakeCaptureAssessment{
+            .shortlist_key          = FakeShortlistKey{.digest = 53, .frontier = 12},
+            .protected_rebuild_work = PrefillWork{.tokens = 12},
+            .publishes_private      = true,
+            .physically_feasible    = false,
+        };
+        program.capture_summary.endpoint        = endpoint(53, 12);
+        program.capture_feasible_after_releases = 1;
+        const auto reserved =
+            manager.reserve_active_capture(program, active.lane, FakeCaptureOffer{.id = 5}, 0, {});
+        if (!reclaim) {
+            require(reserved == FakeManager::ActiveCaptureReserveResult::Skipped &&
+                        program.released_continuations.empty() &&
+                        manager.catalog_state(0) == FakeManager::CatalogState::Catalogued,
+                    "a Host-backed manager released a continuation for a private capture");
+            (void)finish_active(manager, program, active, 12);
+            continue;
+        }
+        require(reserved == FakeManager::ActiveCaptureReserveResult::Reserved,
+                "Host-less private capture was skipped instead of reclaiming Device state");
+        require(program.released_continuations == std::vector<std::uint32_t>{oldest.sequence.id} &&
+                    manager.catalog_state(0) == FakeManager::CatalogState::Vacant &&
+                    manager.catalog_state(1) == FakeManager::CatalogState::Catalogued,
+                "Host-less private capture did not release exactly the oldest idle continuation");
+        auto progress      = manager.progress_context_transaction(program, {});
+        const auto outcome = std::get<FakeManager::ActiveCaptureOutcome>(std::move(progress));
+        require(outcome.status == ContextTransactionStatus::Published,
+                "Host-less private capture did not publish after reclaiming");
+        RuntimeStats stats;
+        manager.populate_runtime_stats(program, stats);
+        require(stats.pressure_private_owners_evicted == 1,
+                "Host-less capture reclaim was not reported as a private eviction");
+        (void)finish_active(manager, program, active, 12);
+    }
+}
+
 void test_projected_nested_shared_candidates_use_marginal_value() {
     FakeManager manager = make_manager(1, 2, 2);
     FakeProgram program;
@@ -3455,6 +3510,8 @@ void test_publication_only_pressure_constructs_adoptable_target() {
 } // namespace
 
 int main() {
+    run_test("Host-less private capture reclaim",
+             test_hostless_private_capture_reclaims_oldest_idle_continuation);
     run_test("independent complete-target oracle",
              test_complete_search_against_small_exhaustive_oracle);
     run_test("publication-only construction",

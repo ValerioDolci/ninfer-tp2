@@ -244,11 +244,15 @@ public:
         std::optional<Choice> choice;
     };
 
+    // `reclaim_private_for_capture` is for Programs without a Host StateImage tier (Engine: zero
+    // host_state_slots); see reclaim_private_owners_for_capture().
     ResourceManager(std::uint32_t lane_count, std::uint32_t private_catalog_capacity,
                     std::uint32_t shared_catalog_capacity, bool cache_enabled,
-                    std::uint32_t max_long_anchors, ContextMachineCostModel cost_model)
+                    std::uint32_t max_long_anchors, ContextMachineCostModel cost_model,
+                    bool reclaim_private_for_capture = false)
         : lane_count_(lane_count), catalog_count_(private_catalog_capacity),
           shared_catalog_count_(shared_catalog_capacity), cache_enabled_(cache_enabled),
+          reclaim_private_for_capture_(reclaim_private_for_capture),
           catalog_(private_catalog_capacity), shared_catalog_(shared_catalog_capacity),
           session_index_(private_catalog_capacity),
           prefix_index_(checked_prefix_index_capacity(private_catalog_capacity,
@@ -545,7 +549,11 @@ public:
                 }
             }
         }
+        const auto reassess_private = [&] {
+            return program.inspect_capture(offer, nullptr, nullptr, private_replacement, false);
+        };
         if (exact_shared != nullptr) {
+            reclaim_private_owners_for_capture(program, private_baseline, reassess_private);
             if (!private_baseline.publishes_private || !private_baseline.physically_feasible) {
                 program.skip_capture(std::move(offer));
                 return ActiveCaptureReserveResult::Skipped;
@@ -799,6 +807,7 @@ public:
         }
 
         if (!selected) {
+            reclaim_private_owners_for_capture(program, private_baseline, reassess_private);
             if (!private_baseline.publishes_private || !private_baseline.physically_feasible) {
                 program.skip_capture(std::move(offer));
                 return ActiveCaptureReserveResult::Skipped;
@@ -1574,6 +1583,47 @@ private:
         entry.explicit_credit     = false;
         entry.credit_expiry_epoch = 0;
         advance_revision(entry.revision);
+    }
+
+    // Without a Host StateImage tier a prefill capture (turn-closure rewrite, long anchor) that
+    // finds the Device State pool full cannot fall back to a Host snapshot of its checkpoint, and
+    // private captures never plan pressure. Once earlier conversations fill the pool, every new
+    // conversation would keep only its endpoint and re-prefill its next turn. With the reclaim
+    // enabled, a Device-infeasible private capture first releases idle private continuations
+    // without a live session, lowest retention weight first and least recently admitted within
+    // it, until the capture fits or none remains. Continuations with an active edge (a retained
+    // source of a running request) and LiveSession continuations are never released here.
+    template <class Reassess>
+    void reclaim_private_owners_for_capture(Program& program, CaptureAssessment& baseline,
+                                            Reassess&& reassess) {
+        if (!reclaim_private_for_capture_) { return; }
+        while (baseline.publishes_private && !baseline.physically_feasible) {
+            std::optional<std::uint32_t> victim;
+            for (std::uint32_t slot = 0; slot < catalog_count_; ++slot) {
+                const CatalogEntry& entry = catalog_[slot];
+                if (entry.state != CatalogState::Catalogued || !entry.handle ||
+                    entry.retention == RetentionClass::LiveSession ||
+                    private_has_active_edge(slot)) {
+                    continue;
+                }
+                if (!victim || std::pair{private_retention_weight(entry.retention), entry.id} <
+                                   std::pair{private_retention_weight(catalog_[*victim].retention),
+                                             catalog_[*victim].id}) {
+                    victim = slot;
+                }
+            }
+            if (!victim) { return; }
+            CatalogEntry& entry = catalog_[*victim];
+            const auto released = program.release_continuation(std::move(*entry.handle));
+            if (released.status != ConsumeStatus::Consumed) { return; }
+            const std::uint32_t dropped = continuation_checkpoint_count(entry.summary);
+            erase_session_if_owner(entry.id);
+            clear_catalog_entry(entry);
+            saturating_increment(context_stats_.pressure_private_owners_evicted);
+            record_checkpoint_drops(context_stats_, dropped);
+            rebuild_prefix_index();
+            baseline = reassess();
+        }
     }
 
     void rebuild_prefix_index() {
@@ -3365,6 +3415,7 @@ private:
     std::uint32_t catalog_count_        = 0;
     std::uint32_t shared_catalog_count_ = 0;
     bool cache_enabled_                 = true;
+    bool reclaim_private_for_capture_   = false;
     std::array<LogicalLaneState, kMaximumConcurrency> lanes_{};
     std::vector<CatalogEntry> catalog_;
     std::vector<SharedCatalogEntry> shared_catalog_;

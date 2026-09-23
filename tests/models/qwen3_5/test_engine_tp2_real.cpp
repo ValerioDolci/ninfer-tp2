@@ -16,6 +16,10 @@
 //     default implicit shared-prefix marker after the last message): a ~6k-token document with a
 //     question, then the same conversation with the answer and a new question. The second turn
 //     must reuse at least 80 % of the first prompt, with 4 lanes and with 1 lane (32k context).
+//   * reuse after a one-shot flood: with 8 extra Device StateImages, 32 one-shot requests (more
+//     retained checkpoints than the pool holds) are served four at a time, then a new two-turn
+//     conversation must still reuse at least 80 % of its first prompt. Without a Host tier the
+//     pool would otherwise stay full of old continuations and skip the new turn-closure capture.
 //
 // Returns 77 without the artifact or below two CUDA devices.
 
@@ -209,12 +213,13 @@ void mark_like_chat_completions(ninfer::PromptInput& input) {
     input.context_cache.allow_engine_automatic_shared_prefixes = false;
 }
 
-std::string long_document() {
+std::string long_document(std::string_view city = "Verona", int lines = 240) {
     std::string text = "Leggi il registro del magazzino e poi rispondi alla domanda.\n\n";
-    for (int line = 1; line <= 240; ++line) {
-        text += "Riga " + std::to_string(line) + ": il magazzino di Verona ha ricevuto " +
-                std::to_string(line * 7) + " casse di mele e " + std::to_string(line * 3) +
-                " casse di pere, spedite il giorno " + std::to_string(1 + line % 28) + ".\n";
+    for (int line = 1; line <= lines; ++line) {
+        text += "Riga " + std::to_string(line) + ": il magazzino di " + std::string(city) +
+                " ha ricevuto " + std::to_string(line * 7) + " casse di mele e " +
+                std::to_string(line * 3) + " casse di pere, spedite il giorno " +
+                std::to_string(1 + line % 28) + ".\n";
     }
     return text;
 }
@@ -237,8 +242,10 @@ void print_cache_stats(const ninfer::RuntimeStats& before, const ninfer::Runtime
               << after.pressure_checkpoints_dropped << '\n';
 }
 
-int exercise_long_prefix_reuse(ninfer::Engine& engine, const char* label) {
-    const std::string document = long_document();
+int exercise_long_prefix_reuse(ninfer::Engine& engine, const char* label,
+                               std::string_view city = "Verona", int lines = 240,
+                               std::uint32_t minimum_tokens = 4096) {
+    const std::string document = long_document(city, lines);
     const auto first_turn      = [&] {
         ninfer::PromptInput input =
             user_prompt(document + "\nDomanda: quanto fa 17*23? Rispondi col solo numero.");
@@ -271,8 +278,9 @@ int exercise_long_prefix_reuse(ninfer::Engine& engine, const char* label) {
     const ninfer::RuntimeStats end = engine.runtime_stats();
     failures += check_answer(second, "144", label);
     const std::uint32_t first_tokens = first.prompt.prompt_tokens;
-    if (first_tokens < 4096 || static_cast<std::uint64_t>(second.reused_prompt_tokens) * 5U <
-                                   static_cast<std::uint64_t>(first_tokens) * 4U) {
+    if (first_tokens < minimum_tokens ||
+        static_cast<std::uint64_t>(second.reused_prompt_tokens) * 5U <
+            static_cast<std::uint64_t>(first_tokens) * 4U) {
         std::cerr << label << ": second turn reused " << second.reused_prompt_tokens << " of "
                   << second.prompt.prompt_tokens << " prompt tokens (first turn " << first_tokens
                   << ", path " << static_cast<int>(second.prefix_reuse_path) << ")\n";
@@ -283,6 +291,28 @@ int exercise_long_prefix_reuse(ninfer::Engine& engine, const char* label) {
         ++failures;
     }
     return failures;
+}
+
+// More one-shot continuations than the Device checkpoint pool holds, four in flight at a time,
+// then a new conversation that must still be captured and reused.
+int exercise_reuse_after_one_shots(ninfer::Engine& engine, const char* label) {
+    int failures = 0;
+    for (int round = 0; round < 8; ++round) {
+        std::vector<ninfer::GenerationHandle> handles;
+        for (int lane = 0; lane < 4; ++lane) {
+            const int left = 11 + round * 4 + lane;
+            ninfer::PromptInput input =
+                user_prompt("Quanto fa " + std::to_string(left) + "*3? Rispondi col solo numero.");
+            mark_like_chat_completions(input);
+            handles.push_back(engine.submit(engine.prepare(std::move(input)), greedy(16, true)));
+        }
+        for (int lane = 0; lane < 4; ++lane) {
+            const int left = 11 + round * 4 + lane;
+            failures += check_answer(handles[static_cast<std::size_t>(lane)].wait(),
+                                     std::to_string(left * 3), label);
+        }
+    }
+    return failures + exercise_long_prefix_reuse(engine, label, "Trento", 40, 512);
 }
 
 } // namespace
@@ -312,8 +342,11 @@ int main() {
     try {
         int failures = 0;
         {
-            ninfer::Engine engine(long_engine_options(artifact, 4));
+            ninfer::EngineOptions options            = long_engine_options(artifact, 4);
+            options.context_cache.device_state_slots = 8;
+            ninfer::Engine engine(std::move(options));
             failures += exercise_long_prefix_reuse(engine, "long prefix, 4 lanes");
+            failures += exercise_reuse_after_one_shots(engine, "reuse after one-shot flood");
         }
         {
             ninfer::Engine engine(long_engine_options(artifact, 1));
