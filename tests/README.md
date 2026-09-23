@@ -143,16 +143,41 @@ NINFER_TEST_ARTIFACT=$PWD/out/qwen3_6_35b_a3b.ninfer \
   ctest --test-dir build -R ninfer_qwen3_5_moe_real_test --output-on-failure
 ```
 
-The two-device tests need two CUDA devices and split the artifact across devices 0 and 1. The MTP
-test compares MTP (K=3) answers with the same tp 2 model without speculation, checks the draft
-acceptance and runs two-lane MTP rounds; its `optimized_real` variant selects the optimized
-proposal head. The DFlash2 test (K=4, optimized proposal head) requires answers identical to the
-tp 2 model without speculation on three short prompts, a nonzero acceptance, two-lane DFlash2
-rounds and prefix reuse across two turns:
+The two-device (tp 2) tests need two CUDA devices, use devices 0 and 1, and return 77 (skipped)
+with fewer. Without an artifact:
+
+- The nine op suites `ninfer_{allreduce,linear_split,output_head_split,attention_headlocal,
+  attn_input_proj_split,gdn_projections_split,gdn_headsplit,linear_swiglu_split,linear_add_split}_test`
+  qualify each column- or row-parallel form at the shard shapes, and the all-reduce and row
+  gather against FP64 and exact oracles.
+- `ninfer_artifact_sharded_materialization_tp2_test` uploads Replicated, Rows, Columns,
+  PrimaryOnly and SingleDevice parents to both devices and compares every device's bytes with
+  host-applied slices; the plan checks (`ninfer_artifact_slices_test`, `ninfer_qwen3_5_shard_map_test`, the
+  one-device `ninfer_artifact_sharded_materialization_test`) run without a second device.
+- `ninfer_qwen3_5_text_context_tp2_test` compares a synthetic two-layer model's tp 2 prefill and
+  decode logits with tp 1 and checks the rank-0 logits gather byte for byte.
+
+```bash
+ctest --test-dir build -R '_(split|headlocal|headsplit|allreduce)_test|sharded_materialization|text_context_tp2_test' \
+  --output-on-failure
+```
+
+With the artifact, split across the two devices: `ninfer_qwen3_5_sharded_load_real_test` (and its
+`sharded_load_mtp_real` variant with the MTP head) checks the per-device placement and bytes of the
+loaded model; `ninfer_qwen3_5_text_context_tp2_real_test` prefills and decodes one prompt through
+the tp 2 `TextContext`; the Engine test serves single, concurrent, prefix-reuse and one-shot flood
+requests. The MTP test compares MTP (K=3) answers with the same tp 2 model without speculation,
+checks the draft acceptance and runs two-lane MTP rounds; its prefix-reuse legs resume a retained
+~9k-token conversation through the MTP bridge on both ranks, with 4 lanes and 1 lane, and must
+give the answer of the same prompt prefilled cold and of its exact (zero-suffix) repeat. Its
+`optimized_real` variant selects the optimized proposal head. The DFlash2 test (K=4, optimized
+proposal head) requires answers identical to the tp 2 model without speculation on three short
+prompts, a nonzero acceptance, two-lane DFlash2 rounds and prefix reuse across two turns:
 
 ```bash
 NINFER_TEST_ARTIFACT=$PWD/out/qwen3_8_27b_nvfp4.ninfer \
-  ctest --test-dir build -R 'ninfer_qwen3_5_engine_((mtp|dflash2)_)?tp2' --output-on-failure
+  ctest --test-dir build -R 'ninfer_qwen3_5_(engine_((mtp|dflash2)_)?tp2|sharded_load|text_context_tp2_real)' \
+  --output-on-failure
 ```
 
 Without `NINFER_TEST_ARTIFACT`, CTest marks these real Engine tests as skipped. Run GPU integration
