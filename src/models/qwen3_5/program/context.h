@@ -176,7 +176,9 @@ prefill_multimodal_chunk(PrefillContext& state, const PreparedPromptData& prompt
 
 struct MtpBridgeInput {
     const Tensor* previous_hidden = nullptr;
-    std::int32_t position         = 0;
+    // Rank 1's retained copy at tensor-parallel width 2; null on one device.
+    const Tensor* peer_previous_hidden = nullptr;
+    std::int32_t position              = 0;
     std::array<std::int32_t, 3> rope_position{};
 };
 
@@ -185,6 +187,7 @@ void sample_from_hidden(PrefillContext& state, const Tensor& hidden, std::int32_
 // Resumes the MTP head at `position` from the retained target hidden of that position. At
 // tensor-parallel width 2 `peer_previous_hidden` is rank 1's retained copy (the same StateImage
 // slot of its mirror pool) and both ranks run the split head; it is null on one device.
+// `next_embedding`, when set, is rank 0's composed embedding of `next_token` (a visual column).
 void mtp_bridge_and_propose(PrefillContext& state, const Tensor& next_token,
                             const Tensor& previous_hidden, const Tensor* peer_previous_hidden,
                             std::int32_t position, std::span<const std::int32_t> rope_position,

@@ -471,6 +471,15 @@ std::size_t dflash_accept_workspace(const SequencePlanImpl& plan, std::int32_t b
                      public_tokens, drafts, drafts, batch, batch);
 }
 
+// The merged-token extent one Vision item's encode is planned for.
+std::uint32_t vision_item_tokens(const SequencePlanImpl& plan) {
+    if (plan.vision_parameters == nullptr || !plan.vision_parameters->vision) {
+        throw std::logic_error("Vision workspace planning has no Vision parameters");
+    }
+    return static_cast<std::uint32_t>(std::min<std::uint64_t>(
+        {plan.capacity, kMaximumVisionItemTokens, plan.max_vision_item_tokens}));
+}
+
 // One rank's transient workspace at tensor-parallel width 2, following the allocation order of
 // TextContext's split schedule (execution/text.cpp: prefill_impl_tp2 with its MTP prompt
 // alignment, ordinary_decode_batch_tp2, target verification, the MTP forwards and proposals,
@@ -485,10 +494,9 @@ WorkspacePlan build_tensor_parallel_workspace_plan(const SequencePlanImpl& plan)
     const auto& parameters = *plan.parameters;
     const auto& config     = parameters.model.config().text;
     const TextConfig shard = execution::shard_text_config(config, plan.tp);
-    if (plan.causal_scoring || plan.features.vision ||
-        plan.speculative_backend == SpeculativeBackend::DFlash) {
+    if (plan.causal_scoring || plan.speculative_backend == SpeculativeBackend::DFlash) {
         throw std::invalid_argument(
-            "tensor-parallel workspace supports ordinary, MTP and DFlash2 text generation only");
+            "tensor-parallel workspace supports ordinary, MTP and DFlash2 generation only");
     }
     const bool mtp = plan.speculative_backend == SpeculativeBackend::Mtp;
     if (mtp && (!parameters.mtp || !shard.attention)) {
@@ -652,6 +660,7 @@ WorkspacePlan build_tensor_parallel_workspace_plan(const SequencePlanImpl& plan)
         matrix(layout, DType::BF16, query_width, 1);
         matrix(layout, DType::BF16, hidden, 1);
         matrix(layout, DType::BF16, hidden, 1);
+        if (plan.features.vision) { matrix(layout, DType::I32, 1, 3); }
         attention_scratch(layout, 1, 1, 1);
         linear_scratch(layout, p.output, 1, 1);
         scratch(layout, execution::mtp_ffn_split_workspace_bytes(p.ffn, 1, 1));
@@ -661,11 +670,11 @@ WorkspacePlan build_tensor_parallel_workspace_plan(const SequencePlanImpl& plan)
     WorkspacePlan out;
     // The text prefill chunk up to its sampled token; the MTP prompt alignment continues from it.
     const auto text_prefill = [&](WorkspaceLayoutBuilder& layout) {
-        // A text chunk continuing a multimodal prefix carries a one-axis RoPE offset; rank 1
-        // holds its own copy of the delta.
-        (void)workspace::text_prefill_roots(layout, config, chunk, 1, 0);
+        // A multimodal chunk carries three-axis RoPE positions and its visual scatter indices on
+        // both ranks; a text chunk continuing a multimodal prefix carries a one-axis RoPE offset.
+        (void)workspace::text_prefill_roots(layout, config, chunk, plan.features.vision ? 3 : 1,
+                                            plan.features.vision ? chunk : 0);
         (void)workspace::tp_call_roots(layout, config, chunk);
-        (void)layout.alloc(DType::I32, {1});
         target_body(layout, 1, chunk, TextPhase::Prefill, false, 1, 1, chunk);
         matrix(layout, DType::BF16, hidden, 1);
         split_logits(layout, 1);
@@ -711,16 +720,20 @@ WorkspacePlan build_tensor_parallel_workspace_plan(const SequencePlanImpl& plan)
             WorkspaceLayoutBuilder layout;
             text_prefill(layout);
             matrix(layout, DType::I32, 1, chunk);
+            if (plan.features.vision) {
+                // Rank 0's composed MTP input embedding and its shifted visual scatter indices.
+                matrix(layout, DType::BF16, hidden, chunk);
+                (void)workspace::visual_scatter_indices(layout, chunk);
+            }
             {
                 auto final_chunk = layout.scope();
                 mtp_prefill_chunk(layout, chunk, true);
             }
             // The prompt proposal steps after the final chunk: the next hidden, the rope
-            // positions and rank 1's delta, one MTP column and its proposal.
+            // position, one MTP column and its proposal.
             for (std::int32_t step = 1; step < drafts; ++step) {
                 auto ar_step = layout.scope();
                 matrix(layout, DType::BF16, hidden, 1);
-                matrix(layout, DType::I32, 1, 1);
                 matrix(layout, DType::I32, 1, 1);
                 mtp_core(layout, 1, 1, 1);
                 proposal(layout, 1);
@@ -758,6 +771,16 @@ WorkspacePlan build_tensor_parallel_workspace_plan(const SequencePlanImpl& plan)
     out.general_capacity = std::max({out.text_prefill, out.ordinary_round, out.mtp_prefill,
                                      out.mtp_round, out.dflash_context, out.dflash_round});
     out.capacity = out.general_capacity;
+    if (plan.features.vision) {
+        // The rank that holds the tower encodes each item after its general prefix, as on one
+        // device; the other rank only receives the merged embeddings.
+        out.vision = execution::VisionContext::plan_workspace(
+            *parameters.model.config().vision, *plan.vision_parameters->vision,
+            vision_item_tokens(plan), out.general_capacity);
+        out.vision_receiver   = execution::VisionContext::plan_receiver(*out.vision);
+        out.capacity          = std::max(out.capacity, out.vision->capacity_bytes);
+        out.receiver_capacity = std::max(out.general_capacity, out.vision_receiver->capacity_bytes);
+    }
     return out;
 }
 
@@ -1061,16 +1084,16 @@ WorkspacePlan build_workspace_plan(const SequencePlanImpl& plan) {
                   out.dflash_context, out.dflash_round, out.causal_score});
     out.capacity = out.general_capacity;
     if (plan.features.vision) {
-        const std::uint32_t merged = static_cast<std::uint32_t>(
-            std::min<std::uint64_t>(plan.capacity, kMaximumVisionItemTokens));
         out.vision = execution::VisionContext::plan_workspace(
-            *parameters.model.config().vision, *parameters.vision, merged, out.general_capacity);
+            *parameters.model.config().vision, *plan.vision_parameters->vision,
+            vision_item_tokens(plan), out.general_capacity);
         out.capacity = std::max(out.capacity, out.vision->capacity_bytes);
     }
     return out;
 }
 
-void validate_target_options(const execution::Parameters& parameters, DeviceContext& device,
+void validate_target_options(const execution::Parameters& parameters,
+                             const execution::Parameters* peer_parameters, DeviceContext& device,
                              const EngineOptions& options) {
     if (!parameters.model.config().text.attention ||
         parameters.model.config().text.full_attention_layers == 0) {
@@ -1151,18 +1174,20 @@ void validate_target_options(const execution::Parameters& parameters, DeviceCont
         throw std::invalid_argument("Qwen3.5 tensor-parallel width must be 1 or 2");
     }
     if (options.tp != 1) {
-        if (parameters.model.device_count() != options.tp || parameters.device != 0) {
-            throw std::invalid_argument(
-                "tensor-parallel planning requires rank 0 Parameters of a two-device Model");
+        if (parameters.model.device_count() != options.tp || parameters.device != 0 ||
+            peer_parameters == nullptr || &peer_parameters->model != &parameters.model ||
+            peer_parameters->device != 1) {
+            throw std::invalid_argument("tensor-parallel planning requires rank 0 and rank 1 "
+                                        "Parameters of one two-device Model");
         }
-        // The split schedule implements prefill, the ordinary decode round, the MTP round and
-        // the DFlash2 round of the dense Text model (TextContext); everything else runs on one
-        // device only.
+        // The split schedule implements text and multimodal prefill, the ordinary decode round,
+        // the MTP round and the DFlash2 round of the dense Text model (TextContext); everything
+        // else runs on one device only.
         if (options.purpose != EnginePurpose::Generation ||
-            options.speculative.backend == SpeculativeBackend::DFlash || options.enable_vision) {
+            options.speculative.backend == SpeculativeBackend::DFlash) {
             throw std::invalid_argument(
-                "tensor-parallel execution supports ordinary, MTP and DFlash2 text generation only "
-                "(no DFlash, Vision or causal scoring)");
+                "tensor-parallel execution supports ordinary, MTP and DFlash2 generation only "
+                "(no DFlash or causal scoring)");
         }
         // The DFlash2 drafter runs whole on rank 0, while the full output head is split by
         // vocabulary rows across the ranks.
@@ -1191,8 +1216,10 @@ std::unique_ptr<SequencePlanImpl> build_sequence_candidate(const SequencePlannin
     if (main_page_groups == 0) {
         throw std::invalid_argument("Main KV physical page count must be positive");
     }
-    auto impl                 = std::make_unique<SequencePlanImpl>();
-    impl->parameters          = inputs.parameters;
+    auto impl                    = std::make_unique<SequencePlanImpl>();
+    impl->parameters             = inputs.parameters;
+    impl->vision_parameters      = inputs.vision_parameters;
+    impl->max_vision_item_tokens = inputs.max_vision_item_tokens;
     impl->capacity            = inputs.capacity;
     impl->main_page_groups    = main_page_groups;
     impl->kv_capacity         = static_cast<std::uint32_t>(checked_i32(
@@ -1264,7 +1291,8 @@ std::unique_ptr<SequencePlanImpl> build_sequence_candidate(const SequencePlannin
     }
 
     // Rank 0's layout bounds rank 1's, which only omits the drafter's state; both ranks are
-    // budgeted for it.
+    // budgeted for it. With Vision the budget carries the encoding rank's workspace; the other
+    // rank's budget is credited with the part it does not allocate.
     impl->device_reservation_bytes = checked_add(
         checked_add(impl->persistent.bytes, impl->workspace.capacity, "sequence memory plan"),
         impl->graph_allowance_bytes, "sequence graph allowance");
@@ -1274,25 +1302,31 @@ std::unique_ptr<SequencePlanImpl> build_sequence_candidate(const SequencePlannin
 } // namespace
 
 std::unique_ptr<qwen3_5::detail::SequencePlannerImpl>
-make_sequence_planner_impl(const execution::Parameters& parameters, DeviceContext& device,
+make_sequence_planner_impl(const execution::Parameters& parameters,
+                           const execution::Parameters* peer_parameters, DeviceContext& device,
                            const EngineOptions& options) {
-    validate_target_options(parameters, device, options);
+    validate_target_options(parameters, peer_parameters, device, options);
+    if (options.tp == 1 && peer_parameters != nullptr) {
+        throw std::invalid_argument("single-device planning takes no rank 1 Parameters");
+    }
     SequencePlanningInputs inputs{
-        .parameters          = &parameters,
-        .capacity            = options.max_context,
-        .max_concurrency     = options.max_concurrency,
-        .prefill_chunk       = std::min(options.prefill_chunk, options.max_context),
-        .draft_window        = options.speculative.draft_tokens,
-        .speculative_backend = options.speculative.backend,
-        .kv_storage          = options.kv_cache,
-        .proposal_head       = options.speculative.proposal_head,
-        .features            = models::load_options(options),
-        .use_cuda_graph      = options.use_cuda_graph,
-        .causal_scoring      = options.purpose == EnginePurpose::CausalScoring,
-        .device              = options.device,
-        .tp                  = options.tp,
-        .tp_mailbox          = options.tp_mailbox,
-        .context_cache       = options.context_cache,
+        .parameters             = &parameters,
+        .vision_parameters      = models::vision_rank(options) == 1 ? peer_parameters : &parameters,
+        .max_vision_item_tokens = options.max_vision_tokens.value_or(kMaximumMaxVisionTokens),
+        .capacity               = options.max_context,
+        .max_concurrency        = options.max_concurrency,
+        .prefill_chunk          = std::min(options.prefill_chunk, options.max_context),
+        .draft_window           = options.speculative.draft_tokens,
+        .speculative_backend    = options.speculative.backend,
+        .kv_storage             = options.kv_cache,
+        .proposal_head          = options.speculative.proposal_head,
+        .features               = models::load_options(options),
+        .use_cuda_graph         = options.use_cuda_graph,
+        .causal_scoring         = options.purpose == EnginePurpose::CausalScoring,
+        .device                 = options.device,
+        .tp                     = options.tp,
+        .tp_mailbox             = options.tp_mailbox,
+        .context_cache          = options.context_cache,
     };
     const std::uint32_t logical_pages = page_count(inputs.capacity);
     const std::uint32_t minimum_pages = std::max(logical_pages, inputs.max_concurrency);

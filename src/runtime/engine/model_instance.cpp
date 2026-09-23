@@ -11,6 +11,7 @@
 #include <memory>
 #include <set>
 #include <stdexcept>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -57,13 +58,26 @@ void validate_options(const EngineOptions& options) {
         throw std::invalid_argument(
             "Engine media_live_bytes must be nonzero when Vision is enabled");
     }
+    if ((options.vision_device || options.max_vision_tokens) && !options.enable_vision) {
+        throw std::invalid_argument("Engine vision_device and max_vision_tokens require Vision");
+    }
+    if (options.vision_device && std::find(options.devices.begin(), options.devices.end(),
+                                           *options.vision_device) == options.devices.end()) {
+        throw std::invalid_argument("Engine vision_device must be one of devices");
+    }
+    if (options.max_vision_tokens && (*options.max_vision_tokens < kMinimumMaxVisionTokens ||
+                                      *options.max_vision_tokens > kMaximumMaxVisionTokens)) {
+        throw std::invalid_argument("Engine max_vision_tokens must be in [" +
+                                    std::to_string(kMinimumMaxVisionTokens) + "," +
+                                    std::to_string(kMaximumMaxVisionTokens) + "]");
+    }
     if (options.media_preprocess_threads > 64) {
         throw std::invalid_argument("Engine media_preprocess_threads must be in [0,64]");
     }
     if (options.tp == 2) {
-        // Rejected before the artifact is read: the two-device schedule covers prefill, the
-        // ordinary decode round, the MTP round and the DFlash2 round of the dense Text model only
-        // (models/qwen3_5/execution/text.h).
+        // Rejected before the artifact is read: the two-device schedule covers text and
+        // multimodal prefill, the ordinary decode round, the MTP round and the DFlash2 round of
+        // the dense Text model only (models/qwen3_5/execution/text.h).
         if (options.purpose != EnginePurpose::Generation) {
             throw std::invalid_argument("Engine tp 2 does not support CausalScoring");
         }
@@ -77,9 +91,6 @@ void validate_options(const EngineOptions& options) {
             options.speculative.proposal_head != ProposalHead::Optimized) {
             throw std::invalid_argument(
                 "Engine tp 2 DFlash2 requires the optimized proposal head (--lm-head-draft)");
-        }
-        if (options.enable_vision) {
-            throw std::invalid_argument("Engine tp 2 does not support Vision");
         }
         if (options.kv_cache != KvCacheStorage::BFloat16 &&
             options.kv_cache != KvCacheStorage::Int8Group64) {
@@ -141,6 +152,8 @@ EngineOptions normalize_engine_options(EngineOptions options) {
         options.kv_capacity          = KvCapacityPolicy::explicit_capacity(options.max_context);
         options.speculative          = {};
         options.enable_vision        = false;
+        options.vision_device.reset();
+        options.max_vision_tokens.reset();
         options.use_cuda_graph       = false;
         options.context_cache        = ContextCacheOptions{.enabled = false};
         break;
@@ -237,13 +250,15 @@ ModelInstance::ModelInstance(std::unique_ptr<models::qwen3_5::Model> source,
               ? std::make_unique<const models::qwen3_5::execution::Parameters>(*model, 1)
               : nullptr),
       frontend(models::qwen3_5::make_frontend(
-          model->resources(), {.chat_template_path       = options.chat_template_path,
-                               .architecture             = model->config().text.architecture,
-                               .vision_enabled           = options.enable_vision,
-                               .max_context              = options.max_context,
-                               .media_cache_bytes        = options.media_cache_bytes,
-                               .media_live_bytes         = options.media_live_bytes,
-                               .media_preprocess_threads = options.media_preprocess_threads})),
+          model->resources(),
+          {.chat_template_path       = options.chat_template_path,
+           .architecture             = model->config().text.architecture,
+           .vision_enabled           = options.enable_vision,
+           .max_context              = options.max_context,
+           .media_cache_bytes        = options.media_cache_bytes,
+           .media_live_bytes         = options.media_live_bytes,
+           .media_preprocess_threads = options.media_preprocess_threads,
+           .max_item_vision_tokens = options.max_vision_tokens.value_or(kMaximumMaxVisionTokens)})),
       capacity(options.max_context) {}
 
 ModelInstance::~ModelInstance() = default;
@@ -283,14 +298,22 @@ ConstructedModel construct_model_on(const EngineOptions& options, DeviceContext&
                 context_cost_hardware_class(device.props.name, device.props.major, device.props.minor),
             .prefill_signature = signature},
         options.context_cost.preset_path);
-    auto planner = models::qwen3_5::make_sequence_planner(instance->parameters, device, options);
+    auto planner =
+        execution != nullptr
+            ? models::qwen3_5::make_sequence_planner(instance->parameters,
+                                                     *instance->peer_parameters, device, options)
+            : models::qwen3_5::make_sequence_planner(instance->parameters, device, options);
     // Every rank reserves the same per-rank layout and addresses the same KV pages, so one page
-    // count is resolved against the tightest rank's own free memory.
-    std::vector<std::size_t> rank_budgets{free_device_bytes(device.device)};
+    // count is resolved against the tightest rank's own free memory. A rank that allocates less
+    // than that layout (the rank without the Vision tower skips its encode workspace) is credited
+    // with the difference, so only the tower's rank pays for it.
+    std::vector<std::size_t> rank_budgets{free_device_bytes(device.device) +
+                                          planner.unallocated_reservation_bytes(0)};
     if (execution != nullptr) {
         for (int rank = 1; rank < execution->tp; ++rank) {
             rank_budgets.push_back(
-                free_device_bytes(execution->dev[static_cast<std::size_t>(rank)]->device));
+                free_device_bytes(execution->dev[static_cast<std::size_t>(rank)]->device) +
+                planner.unallocated_reservation_bytes(rank));
         }
     }
     auto resolution =

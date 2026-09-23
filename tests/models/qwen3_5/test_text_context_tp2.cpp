@@ -693,6 +693,7 @@ struct PeerBinding {
                                .linear_attention  = &*storage.state,
                                .text_cache        = &storage.decoder->text_kv,
                                .text_kv_table_row = storage.round->text_kv_table_row,
+                               .rope_delta        = storage.round->rope_delta,
                                .ordinary          = &frame};
     }
 

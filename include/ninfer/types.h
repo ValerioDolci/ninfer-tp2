@@ -27,6 +27,11 @@ inline constexpr std::size_t kDefaultMediaCacheBytes     = 1ULL << 30;
 inline constexpr std::size_t kDefaultMediaLiveBytes      = 2ULL << 30;
 inline constexpr std::uint32_t kDefaultHostStateSlots    = 8;
 inline constexpr std::size_t kDefaultHostKvCapacityBytes = 8ULL << 30;
+// Bounds of EngineOptions::max_vision_tokens. One merged Vision token covers 32x32 pixels, so the
+// minimum is the registered 65,536-pixel image floor and the maximum the per-item execution
+// ceiling.
+inline constexpr std::uint32_t kMinimumMaxVisionTokens = 64;
+inline constexpr std::uint32_t kMaximumMaxVisionTokens = 16'384;
 
 enum class KvCacheStorage : std::uint8_t {
     BFloat16,
@@ -156,11 +161,11 @@ struct EngineOptions {
     EnginePurpose purpose = EnginePurpose::Generation;
     int device            = 0;
     // Tensor-parallel width, 1 or 2. At 2 the dense Text model is split across `devices`
-    // (one id per rank, rank 0 first; rank 0 must equal `device`) for text generation, ordinary,
-    // with MTP or with DFlash2 speculative decoding (DFlash2 with the optimized proposal head
-    // only; its drafter runs on rank 0): DFlash, Vision, CausalScoring, the MoE architecture, KV
-    // storage other than BF16/INT8 and the Host context-cache tiers are rejected. At 1 `devices`
-    // is empty or {device}.
+    // (one id per rank, rank 0 first; rank 0 must equal `device`) for generation, ordinary, with
+    // MTP or with DFlash2 speculative decoding (DFlash2 with the optimized proposal head only; its
+    // drafter runs on rank 0), with or without Vision (see `vision_device`): DFlash,
+    // CausalScoring, the MoE architecture, KV storage other than BF16/INT8 and the Host
+    // context-cache tiers are rejected. At 1 `devices` is empty or {device}.
     int tp = 1;
     std::vector<int> devices;
     std::uint32_t max_context          = 2048; // Logical ceiling of one request or score window.
@@ -176,6 +181,16 @@ struct EngineOptions {
     // Zero selects a bounded worker count from the detected host concurrency.
     std::uint32_t media_preprocess_threads = 0;
     bool enable_vision                     = false;
+    // CUDA device that holds the Vision tower and runs its encoder; empty selects `device`. It
+    // must be one of `devices` and requires `enable_vision`. At tp 2 the other rank receives a
+    // copy of each item's merged embeddings and holds neither the tower nor its encode workspace.
+    std::optional<int> vision_device;
+    // Merged-token ceiling of one image or video item, in [kMinimumMaxVisionTokens,
+    // kMaximumMaxVisionTokens]; empty keeps the maximum. Larger images and videos are resized to
+    // at most N tokens (one token per 32x32 pixels of an image or of two video frames), a video
+    // too long for N tokens is rejected, and the Vision encode workspace is planned for N tokens.
+    // Requires `enable_vision`.
+    std::optional<std::uint32_t> max_vision_tokens;
     bool use_cuda_graph                    = true;
     // At tp 2 with CUDA Graphs, the captured decode all-reduces exchange through pinned host
     // memory (ops::PeerMailbox) instead of event-ordered cross-device copies; false keeps the

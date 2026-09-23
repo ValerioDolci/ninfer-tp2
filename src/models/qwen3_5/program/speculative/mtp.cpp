@@ -132,15 +132,15 @@ void prepare_next_round(const MtpRoundView& view, std::int32_t max_context, cuda
 void mtp_bridge_and_propose_tp2(PrefillContext& state, const Tensor& next_token,
                                 const Tensor& previous_hidden, const Tensor& peer_previous_hidden,
                                 std::int32_t position, std::span<const std::int32_t> rope_position,
-                                bool build_proposal) {
+                                bool build_proposal, const Tensor* next_embedding) {
     const TpExecution& tp = *state.execution.tp;
     if (!tp.mtp_complete() || !tp.mtp_kv.valid()) {
         throw std::logic_error("tensor-parallel MTP bridge requires rank 1's MTP storage");
     }
-    // The tensor-parallel RoPE is one-axis: text positions repeat on the three M-RoPE axes.
-    if (rope_position[1] != rope_position[0] || rope_position[2] != rope_position[0]) {
-        throw std::invalid_argument("tensor-parallel MTP bridge requires a text RoPE position");
-    }
+    // A text position repeats on the three M-RoPE axes and runs one-axis; a visual position keeps
+    // its three axes, [1,3] on each rank as on one device.
+    const bool three_axis_rope =
+        rope_position[1] != rope_position[0] || rope_position[2] != rope_position[0];
     const ExecutionContext& execution          = *tp.execution;
     const DeviceContext& rank1                 = *execution.dev[1];
     qwen3_5::MtpPrefillState& frame            = *state.execution.io.mtp;
@@ -156,14 +156,28 @@ void mtp_bridge_and_propose_tp2(PrefillContext& state, const Tensor& next_token,
 
     TextContext::RankTensors positions{frame.target_positions.slice(0, 0, 1),
                                        peer_frame.target_positions.slice(0, 0, 1)};
-    TextContext::RankTensors rope_positions{state.execution.work.alloc(DType::I32, {1}),
-                                            tp.work->alloc(DType::I32, {1})};
+    TextContext::RankTensors rope_positions;
+    if (three_axis_rope) {
+        rope_positions = {state.execution.work.alloc(DType::I32, {1, 3}),
+                          tp.work->alloc(DType::I32, {1, 3})};
+    } else {
+        rope_positions = {state.execution.work.alloc(DType::I32, {1}),
+                          tp.work->alloc(DType::I32, {1})};
+    }
+    const auto publish_rope = [&](Tensor& destination, cudaStream_t stream) {
+        if (three_axis_rope) {
+            CUDA_CHECK(cudaMemcpyAsync(destination.data, rope_position.data(),
+                                       rope_position.size_bytes(), cudaMemcpyHostToDevice, stream));
+        } else {
+            ops::set_i32_scalar(destination, rope_position[0], stream);
+        }
+    };
     ops::set_i32_scalar(positions[0], position, state.execution.device.stream);
-    ops::set_i32_scalar(rope_positions[0], rope_position[0], state.execution.device.stream);
+    publish_rope(rope_positions[0], state.execution.device.stream);
     {
         const ScopedCurrentDevice scope(rank1.device);
         ops::set_i32_scalar(positions[1], position, rank1.stream);
-        ops::set_i32_scalar(rope_positions[1], rope_position[0], rank1.stream);
+        publish_rope(rope_positions[1], rank1.stream);
     }
     const TextContext::RankTensors hidden{previous_hidden, peer_previous_hidden};
     const TextContext::RankTensors mtp_hidden{frame.ar_hidden, peer_frame.ar_hidden};
@@ -173,7 +187,7 @@ void mtp_bridge_and_propose_tp2(PrefillContext& state, const Tensor& next_token,
     const ops::CausalAttentionExecutionEnvelope bridge_envelope{bridge_visible, bridge_visible};
     card.mtp_forward_batch(next_token, hidden, positions, rope_positions, bridge_envelope,
                            mtp_hidden, build_proposal ? 0 : -1, build_proposal ? &logits : nullptr,
-                           build_proposal ? &draft0 : nullptr);
+                           build_proposal ? &draft0 : nullptr, next_embedding);
     if (!build_proposal) { return; }
 
     if (state.mtp_proposal_extent == 0 ||
@@ -225,13 +239,8 @@ void mtp_bridge_and_propose(PrefillContext& state, const Tensor& next_token,
         throw std::logic_error("MTP bridge needs rank 1's retained hidden exactly at tp 2");
     }
     if (state.execution.tp != nullptr) {
-        // Multimodal prefill, the only source of composed embeddings, is single-device.
-        if (next_embedding != nullptr) {
-            throw std::invalid_argument(
-                "the MTP bridge takes no composed embedding at tensor-parallel width 2");
-        }
         mtp_bridge_and_propose_tp2(state, next_token, previous_hidden, *peer_previous_hidden,
-                                   position, rope_position, build_proposal);
+                                   position, rope_position, build_proposal, next_embedding);
         return;
     }
     state.execution.work.reset();

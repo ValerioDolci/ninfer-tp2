@@ -291,7 +291,7 @@ RequestBasePlan ProgramImpl::plan_request(const PreparedPromptData& prompt,
             }
             if (item.merged_count > workspace_plan.vision->max_merged_tokens ||
                 execution::VisionContext::workspace_bytes(
-                    *parameters.model.config().vision, *parameters.vision,
+                    *parameters.model.config().vision, *vision_parameters().vision,
                     prompt.vision_items[index].patch_count, item.merged_count,
                     *workspace_plan.vision) > workspace_plan.vision->encode_peak_bytes) {
                 throw std::invalid_argument("vision item exceeds the Program workspace envelope");

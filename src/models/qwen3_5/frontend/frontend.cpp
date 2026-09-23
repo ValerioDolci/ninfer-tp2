@@ -42,6 +42,7 @@ constexpr std::string_view kThinkingControl =
     "\n\n Considering the limited time by the user, I have to give the solution based on the "
     "thinking directly now.\n</think>\n\n";
 static_assert(kThinkingControl.ends_with(fi::kCanonicalReasoningCloseSerialization));
+static_assert(kMaximumVisionItemTokens == kMaximumMaxVisionTokens);
 constexpr double kRescaleFactor = 1.0 / 255.0;
 constexpr double kVideoFps      = 2.0;
 constexpr int kVideoMinFrames   = 4;
@@ -578,6 +579,14 @@ public:
             std::min<std::uint64_t>(options.max_context, kMaximumPromptVisionTokens);
         processor.max_vision_tokens = vision_tokens;
         processor.max_raw_patches   = vision_tokens * kRawPatchesPerVisionToken;
+        if (options.max_item_vision_tokens == 0 ||
+            options.max_item_vision_tokens > kMaximumVisionItemTokens) {
+            throw std::invalid_argument("frontend max_item_vision_tokens is out of range");
+        }
+        if (vision_enabled && options.max_item_vision_tokens < kMaximumVisionItemTokens) {
+            // Below the execution ceiling, media are resized to the configured item extent.
+            fi::limit_item_vision_tokens(processor, options.max_item_vision_tokens);
+        }
         if (vision_enabled) {
             const std::uint64_t minimum_live =
                 processor.max_raw_patches * kPreparedVisionPatchFeatures * sizeof(std::uint16_t);

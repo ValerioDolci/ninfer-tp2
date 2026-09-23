@@ -175,6 +175,9 @@ public:
     SequencePlanner& operator=(const SequencePlanner&) = delete;
 
     [[nodiscard]] const runtime::SequenceCapacityCurve& capacity_curve() const noexcept;
+    // Bytes of the curve's per-rank reservation that `rank` does not allocate, whatever the page
+    // count: at tp 2 with Vision, the encode workspace of the rank without the tower.
+    [[nodiscard]] std::size_t unallocated_reservation_bytes(int rank) const noexcept;
     [[nodiscard]] SequencePlan finalize(std::uint32_t main_page_groups) &&;
 
 public:
@@ -1100,6 +1103,13 @@ struct RuntimeContractAccess {
 } // namespace detail
 
 [[nodiscard]] SequencePlanner make_sequence_planner(const execution::Parameters& parameters,
+                                                    DeviceContext& device,
+                                                    const EngineOptions& options);
+
+// Tensor-parallel width 2, with Parameters(model, 0) and Parameters(model, 1) of one two-device
+// Model: rank 1's Parameters supply the Vision tower when rank 1 holds it.
+[[nodiscard]] SequencePlanner make_sequence_planner(const execution::Parameters& parameters,
+                                                    const execution::Parameters& peer_parameters,
                                                     DeviceContext& device,
                                                     const EngineOptions& options);
 

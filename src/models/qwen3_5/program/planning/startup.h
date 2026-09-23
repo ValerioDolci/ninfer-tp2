@@ -65,12 +65,34 @@ struct WorkspacePlan {
     std::size_t dflash_round     = 0;
     std::size_t causal_score     = 0;
     std::size_t general_capacity = 0;
+    // The encoding rank's Vision plan: every tp 1 Program's, and at tp 2 the plan of the rank that
+    // holds the tower.
     std::optional<VisionWorkspacePlan> vision;
-    std::size_t capacity = 0;
+    // At tp 2 with Vision, the other rank's plan: its general prefix followed only by the item
+    // output handoff the encoding rank copies the merged embeddings into.
+    std::optional<VisionWorkspacePlan> vision_receiver;
+    // The encoding rank's workspace, which bounds the other rank's `receiver_capacity`.
+    std::size_t capacity          = 0;
+    std::size_t receiver_capacity = 0;
+
+    // `rank`'s Vision plan and workspace when rank `vision_rank` holds the tower.
+    [[nodiscard]] const VisionWorkspacePlan* rank_vision(int rank, int vision_rank) const noexcept {
+        if (vision_receiver && rank != vision_rank) { return &*vision_receiver; }
+        return vision ? &*vision : nullptr;
+    }
+
+    [[nodiscard]] std::size_t rank_capacity(int rank, int vision_rank) const noexcept {
+        return vision_receiver && rank != vision_rank ? receiver_capacity : capacity;
+    }
 };
 
 struct SequencePlanningInputs {
     const execution::Parameters* parameters = nullptr;
+    // The Parameters of the rank that holds the Vision tower (`features.vision_rank`): rank 0's
+    // `parameters` except at tp 2 with the tower on rank 1. Read only with Vision.
+    const execution::Parameters* vision_parameters = nullptr;
+    // Merged-token ceiling of one Vision item; the encode workspace is planned for it.
+    std::uint32_t max_vision_item_tokens    = static_cast<std::uint32_t>(kMaximumVisionItemTokens);
     std::uint32_t capacity                  = 0;
     std::uint32_t max_concurrency           = 1;
     std::uint32_t prefill_chunk             = 0;
@@ -96,7 +118,9 @@ struct SequencePlanningInputs {
 namespace ninfer::models::qwen3_5::detail {
 
 struct SequencePlanImpl {
-    const execution::Parameters* parameters = nullptr;
+    const execution::Parameters* parameters        = nullptr;
+    const execution::Parameters* vision_parameters = nullptr;
+    std::uint32_t max_vision_item_tokens           = 0;
     std::uint32_t capacity                  = 0;
     std::uint32_t kv_capacity               = 0;
     std::uint32_t main_page_groups          = 0;
@@ -119,8 +143,15 @@ struct SequencePlanImpl {
     std::optional<PersistentLayout> peer_persistent;
     WorkspacePlan workspace;
     std::size_t graph_allowance_bytes = 0;
-    // Per rank: at tp 2 each device is budgeted for rank 0's reservation, which bounds rank 1's.
+    // Per rank: at tp 2 each device is budgeted for rank 0's reservation, which bounds rank 1's,
+    // with the encoding rank's workspace (see unallocated_reservation_bytes).
     std::size_t device_reservation_bytes = 0;
+
+    // Bytes of device_reservation_bytes that `rank` does not allocate: at tp 2 with Vision, the
+    // encode workspace of the rank without the tower.
+    [[nodiscard]] std::size_t unallocated_reservation_bytes(int rank) const noexcept {
+        return workspace.capacity - workspace.rank_capacity(rank, features.vision_rank);
+    }
 };
 
 struct SequencePlannerImpl {
@@ -135,7 +166,8 @@ namespace ninfer::models::qwen3_5::detail {
 
 
 [[nodiscard]] std::unique_ptr<qwen3_5::detail::SequencePlannerImpl>
-make_sequence_planner_impl(const execution::Parameters& parameters, DeviceContext& device,
+make_sequence_planner_impl(const execution::Parameters& parameters,
+                           const execution::Parameters* peer_parameters, DeviceContext& device,
                            const EngineOptions& options);
 [[nodiscard]] std::unique_ptr<SequencePlanImpl>
 finalize_sequence_plan_impl(std::unique_ptr<qwen3_5::detail::SequencePlannerImpl> planner,

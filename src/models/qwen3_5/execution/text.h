@@ -69,11 +69,11 @@ class VisionPrefillSession;
 
 // One Text call over the rank-0 operands, and with a non-null `tp` over both ranks of a
 // two-device Model (tp.h). A null `tp` is the single-device schedule, unchanged. With `tp`, the
-// text prefill chunk (with its MTP prompt alignment or DFlash feature capture), ordinary decode,
-// speculative target verification (with or without DFlash feature capture), the MTP decode-round
-// forwards and proposals, the MTP bridge and their logits run split through the rank-array
-// overloads below; the single-rank MTP and verification entries and multimodal prefill are
-// rejected with std::invalid_argument. The constructor rejects the MoE FFN, paired
+// text and multimodal prefill chunk (with its MTP prompt alignment or DFlash feature capture),
+// ordinary decode, speculative target verification (with or without DFlash feature capture), the
+// MTP decode-round forwards and proposals, the MTP bridge and their logits run split through the
+// rank-array overloads below; the single-rank MTP and verification entries are rejected with
+// std::invalid_argument. The constructor rejects the MoE FFN, paired
 // input projections, KV caches the head-local attention does not support (only BF16 and INT8-G64)
 // and incomplete MTP bindings.
 class TextContext {
@@ -212,13 +212,15 @@ public:
     void mtp_propose_batch(const RankTensors& hidden, Tensor& logits, Tensor& draft_tokens);
     // The MTP bridge over both ranks: `ids` [T] (rank 0's alone) against each rank's copy of the
     // target hidden [H,T], appending both ranks' MTP K/V at `positions` through each rank's
-    // prefill MTP KV row. `rope_positions[r]` are one-axis [T]. With `logits_column` >= 0 rank 0
-    // proposes `draft_token` from that column of `mtp_hidden`, over logits rank 0 alone gathers.
+    // prefill MTP KV row. `rope_positions[r]` are [T], or [T,3] for a visual column. Rank 0 embeds
+    // `ids` unless `input_embeddings` [H,T] (rank 0's) supplies their composed embeddings. With
+    // `logits_column` >= 0 rank 0 proposes `draft_token` from that column of `mtp_hidden`, over
+    // logits rank 0 alone gathers.
     void mtp_forward_batch(const Tensor& ids, const RankTensors& hidden,
                            const RankTensors& positions, const RankTensors& rope_positions,
                            ops::CausalAttentionExecutionEnvelope envelope,
                            const RankTensors& mtp_hidden, int logits_column, Tensor* logits,
-                           Tensor* draft_token);
+                           Tensor* draft_token, const Tensor* input_embeddings = nullptr);
     // One prompt proposal step through each rank's prefill MTP KV row; rank 0 alone gathers the
     // proposal logits.
     void mtp_forward_ar_step(const Tensor& token, const RankTensors& previous_hidden,
@@ -290,8 +292,10 @@ private:
     // MTP head over both ranks: three all-reduces (input projection, attention output, post-mixer
     // down projection) leave the replicated residual identical on the two ranks, as in the text
     // layers. The attention runs over each rank's half of the heads and its own MTP KV pages.
-    void mtp_forward_stem_tp2(const Tensor& ids, const RankTensors& hidden, RankTensors& x,
-                              RankTensors& ah, const RankTensors& staging);
+    // `input_embeddings`, when set, is rank 0's composed embedding of `ids`.
+    void mtp_forward_stem_tp2(const Tensor& ids, const RankTensors& hidden,
+                              const Tensor* input_embeddings, RankTensors& x, RankTensors& ah,
+                              const RankTensors& staging);
     void mtp_forward_tail_tp2(RankTensors& x, const RankTensors& ah, const RankTensors& positions,
                               const RankTensors& rope_positions,
                               ops::CausalAttentionExecutionEnvelope envelope,
@@ -299,9 +303,10 @@ private:
     void mtp_forward_core_tp2(const Tensor& ids, const RankTensors& hidden,
                               const RankTensors& positions, const RankTensors& rope_positions,
                               ops::CausalAttentionExecutionEnvelope envelope,
-                              const RankTensors& mtp_hidden);
+                              const RankTensors& mtp_hidden, const Tensor* input_embeddings);
     void mtp_prefill_chunk_tp2(const Tensor& ids, const RankTensors& hidden,
-                               const RankTensors& positions, const RankTensors& rope_positions,
+                               const Tensor* input_embeddings, const RankTensors& positions,
+                               const RankTensors& rope_positions,
                                ops::CausalAttentionExecutionEnvelope envelope, bool final_chunk,
                                const RankTensors* final_hidden, Tensor* logits,
                                Tensor* draft_token);
@@ -363,11 +368,14 @@ private:
     [[nodiscard]] PrefillChunkResult
     prefill_impl(std::span<const int> ids, const TextPrefill* text_prefill,
                  const MultimodalPrefill* multimodal, Tap& tap, bool finalize_at_end);
-    // Text-only tp2 prefill of one chunk. A DFlash feature tap reads rank 0's replicated residual.
+    // tp2 prefill of one text or multimodal chunk (exactly one of `text_prefill` and
+    // `multimodal`). A multimodal chunk scatters the Vision session's merged embeddings into both
+    // ranks' residual, each from its own copy. A DFlash feature tap reads rank 0's replicated
+    // residual.
     template <class Tap>
-    [[nodiscard]] PrefillChunkResult prefill_impl_tp2(std::span<const int> ids,
-                                                      const TextPrefill& text_prefill, Tap& tap,
-                                                      bool finalize_at_end);
+    [[nodiscard]] PrefillChunkResult
+    prefill_impl_tp2(std::span<const int> ids, const TextPrefill* text_prefill,
+                     const MultimodalPrefill* multimodal, Tap& tap, bool finalize_at_end);
     DeviceContext& ctx_;
     const Parameters& parameters_;
     const TextConfig& config_;

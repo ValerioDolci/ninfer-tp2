@@ -46,6 +46,12 @@ SequencePlanner& SequencePlanner::operator=(SequencePlanner&&) noexcept = defaul
 
 SequencePlanner::~SequencePlanner() = default;
 
+std::size_t SequencePlanner::unallocated_reservation_bytes(int rank) const noexcept {
+    return impl_ != nullptr && impl_->minimum != nullptr
+               ? impl_->minimum->unallocated_reservation_bytes(rank)
+               : 0;
+}
+
 const runtime::SequenceCapacityCurve& SequencePlanner::capacity_curve() const noexcept {
     static const runtime::SequenceCapacityCurve empty;
     return impl_ != nullptr ? impl_->curve : empty;
@@ -474,7 +480,15 @@ void Program::reset_memory_peaks() noexcept { impl_->reset_memory_peaks(); }
 
 SequencePlanner make_sequence_planner(const execution::Parameters& parameters,
                                       DeviceContext& device, const EngineOptions& options) {
-    return SequencePlanner(detail::make_sequence_planner_impl(parameters, device, options));
+    return SequencePlanner(
+        detail::make_sequence_planner_impl(parameters, nullptr, device, options));
+}
+
+SequencePlanner make_sequence_planner(const execution::Parameters& parameters,
+                                      const execution::Parameters& peer_parameters,
+                                      DeviceContext& device, const EngineOptions& options) {
+    return SequencePlanner(
+        detail::make_sequence_planner_impl(parameters, &peer_parameters, device, options));
 }
 
 std::unique_ptr<Program> create_program(const execution::Parameters& parameters,

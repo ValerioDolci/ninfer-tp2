@@ -591,13 +591,16 @@ public:
     const KvCacheStorage kv_storage;
     const ProposalHead proposal_head;
     const bool vision_enabled;
+    // The tensor-parallel rank that holds the Vision tower and encodes; 0 at width 1.
+    const int vision_rank;
     const bool use_cuda_graph;
     const bool causal_scoring;
     const std::size_t kv_payload_bytes;
     const std::size_t graph_allowance_bytes;
     const WorkspacePlan workspace_plan;
 
-    // Tensor-parallel rank 1 (width 2 only). It holds rank 0's workspace layout and rank 0's
+    // Tensor-parallel rank 1 (width 2 only). It holds rank 0's workspace layout (with Vision, only
+    // the tower's rank holds the encode region; WorkspacePlan::rank_capacity) and rank 0's
     // persistent layout without the masked drafter's state (SequencePlanImpl::peer_persistent) on
     // ExecutionContext::dev[1]; its KV page pools, KV execution tables and StateImages are mirrors
     // that rank 0's pools drive, so rank 0's bookkeeping names both ranks' storage. Rank 1 reads
@@ -636,6 +639,11 @@ public:
     std::optional<execution::TpExecution> tp_execution;
 
     [[nodiscard]] bool tensor_parallel() const noexcept { return peer != nullptr; }
+
+    // The Parameters that hold the Vision tower: rank 1's when it holds the tower, else rank 0's.
+    [[nodiscard]] const execution::Parameters& vision_parameters() const noexcept {
+        return vision_rank == 1 && peer_parameters != nullptr ? *peer_parameters : parameters;
+    }
 
     [[nodiscard]] const execution::TpExecution* tp_binding() const noexcept {
         return tp_execution ? &*tp_execution : nullptr;

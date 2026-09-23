@@ -2,6 +2,7 @@
 
 #include "ninfer/types.h"
 
+#include <algorithm>
 #include <string_view>
 
 namespace ninfer::models {
@@ -57,12 +58,22 @@ struct LoadOptions {
     return backend == SpeculativeBackend::DFlash || backend == SpeculativeBackend::DFlash2;
 }
 
+// The rank whose device holds the Vision tower: the index of `vision_device` in `devices`, and
+// rank 0 when it is unset. Engine validation rejects a `vision_device` outside `devices`.
+[[nodiscard]] inline int vision_rank(const EngineOptions& options) noexcept {
+    if (!options.vision_device) { return 0; }
+    const auto found =
+        std::find(options.devices.begin(), options.devices.end(), *options.vision_device);
+    return found == options.devices.end() ? 0 : static_cast<int>(found - options.devices.begin());
+}
+
 [[nodiscard]] inline LoadOptions load_options(const EngineOptions& options) noexcept {
     return {.purpose       = options.purpose,
             .vision        = options.enable_vision,
             .speculative   = options.speculative.backend,
             .proposal_head = options.speculative.proposal_head,
-            .tp            = options.tp};
+            .tp            = options.tp,
+            .vision_rank   = vision_rank(options)};
 }
 
 } // namespace ninfer::models

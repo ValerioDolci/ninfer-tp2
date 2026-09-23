@@ -88,6 +88,10 @@ struct TpExecution {
     // I32 [1] on rank 1: the prefill execution row, equal to rank 0's RoundState
     // text_kv_table_row. Read by prefill only.
     Tensor text_kv_table_row;
+    // I32 [1] on rank 1: its copy of rank 0's RoundState rope_delta, the prefilling sequence's
+    // RoPE delta. The Program publishes both at sequence start and a prefill chunk rewrites both;
+    // the prompt MTP proposal steps offset rank 1's positions by it.
+    Tensor rope_delta;
     // Rank 1's ordinary decode control. Read by ordinary decode only; may be null otherwise.
     const OrdinaryPeerFrame* ordinary = nullptr;
     // Rank 1's ReplaySSM records of its GDN heads, written by speculative target verification
@@ -112,7 +116,8 @@ struct TpExecution {
 
     [[nodiscard]] bool complete() const noexcept {
         return execution != nullptr && events != nullptr && parameters != nullptr &&
-               work != nullptr && linear_attention != nullptr && text_cache != nullptr;
+               work != nullptr && linear_attention != nullptr && text_cache != nullptr &&
+               rope_delta.data != nullptr;
     }
 
     // The MTP members every tensor-parallel MTP call reads (mtp_kv is per call).

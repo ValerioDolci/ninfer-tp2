@@ -52,7 +52,7 @@ const PersistentLayout& ProgramImpl::PeerRuntime::layout(const SequencePlanImpl&
 
 ProgramImpl::PeerRuntime::PeerRuntime(DeviceContext& peer_device, const SequencePlanImpl& plan)
     : device(peer_device), persistent(layout(plan).bytes, ZeroFill::Yes),
-      workspace_storage(plan.workspace.capacity, ZeroFill::Yes),
+      workspace_storage(plan.workspace.rank_capacity(1, plan.features.vision_rank), ZeroFill::Yes),
       work(DeviceSpan{workspace_storage.base(), plan.workspace.general_capacity}) {
     const PersistentLayout& own = layout(plan);
     const DeviceSpan backing    = persistent.alloc_bytes(own.bytes, 256);
@@ -85,11 +85,12 @@ ProgramImpl::ProgramImpl(const execution::Parameters& parameters_in, const Seque
       prefill_chunk(plan.prefill_chunk), draft_window(plan.draft_window),
       speculative_backend(plan.speculative_backend), kv_storage(plan.kv_storage),
       proposal_head(plan.proposal_head), vision_enabled(plan.features.vision),
-      use_cuda_graph(plan.use_cuda_graph), causal_scoring(plan.causal_scoring),
-      kv_payload_bytes(plan.persistent.kv_payload_bytes),
+      vision_rank(plan.features.vision_rank), use_cuda_graph(plan.use_cuda_graph),
+      causal_scoring(plan.causal_scoring), kv_payload_bytes(plan.persistent.kv_payload_bytes),
       graph_allowance_bytes(plan.graph_allowance_bytes), workspace_plan(plan.workspace),
       persistent(plan.persistent.bytes, tensor_parallel_zero_fill(plan)),
-      workspace_storage(plan.workspace.capacity, tensor_parallel_zero_fill(plan)),
+      workspace_storage(plan.workspace.rank_capacity(0, plan.features.vision_rank),
+                        tensor_parallel_zero_fill(plan)),
       work(DeviceSpan{workspace_storage.base(), plan.workspace.general_capacity}),
       continuation_states(continuation_capacity), continuation_slots(continuation_capacity),
       shared_prefix_states(shared_prefix_capacity), shared_prefix_slots(shared_prefix_capacity),
@@ -150,9 +151,15 @@ ProgramImpl::ProgramImpl(const execution::Parameters& parameters_in, const Seque
             throw std::invalid_argument(
                 "tensor-parallel Program requires Host state slots and Host KV capacity of 0");
         }
-        if (speculative_backend == SpeculativeBackend::DFlash || vision_enabled || causal_scoring) {
-            throw std::invalid_argument("tensor-parallel Program supports ordinary, MTP and "
-                                        "DFlash2 text generation only");
+        if (speculative_backend == SpeculativeBackend::DFlash || causal_scoring) {
+            throw std::invalid_argument(
+                "tensor-parallel Program supports ordinary, MTP and DFlash2 generation only");
+        }
+        if (vision_enabled && (!workspace_plan.vision_receiver ||
+                               !(vision_rank == 0 ? parameters : *peer_parameters_in).vision ||
+                               (vision_rank == 0 ? *peer_parameters_in : parameters).vision)) {
+            throw std::invalid_argument(
+                "tensor-parallel Vision requires the tower on exactly its vision rank");
         }
         execution_context = execution_in;
         peer_parameters   = peer_parameters_in;
@@ -377,6 +384,7 @@ ProgramImpl::ProgramImpl(const execution::Parameters& parameters_in, const Seque
             .linear_attention     = &peer->state_images->linear(),
             .text_cache           = &peer->decoder->text_kv,
             .text_kv_table_row    = peer->io.text_kv_table_row,
+            .rope_delta           = peer->io.rope_delta,
             .ordinary             = peer->io.ordinary ? &peer->ordinary : nullptr,
             .replay_records       = speculative ? &*peer->replay_records : nullptr,
             .mtp_cache            = mtp ? peer->decoder->mtp_cache() : nullptr,
@@ -706,23 +714,24 @@ MemorySummary ProgramImpl::memory_summary() const noexcept {
                 std::max(active_handoff_bytes, request.prefill->vision->active_handoff_bytes());
         }
     }
-    std::size_t active_workspace_bytes = work.used();
-    if (workspace_plan.vision && active_handoff_bytes != 0) {
-        active_workspace_bytes =
-            std::max(active_workspace_bytes,
-                     workspace_plan.vision->handoff_offset_bytes + active_handoff_bytes);
+    // Rank 0's workspace; at tp 2 its Vision plan is the receiver's unless rank 0 holds the tower.
+    const VisionWorkspacePlan* vision_plan = workspace_plan.rank_vision(0, vision_rank);
+    std::size_t active_workspace_bytes     = work.used();
+    if (vision_plan != nullptr && active_handoff_bytes != 0) {
+        active_workspace_bytes = std::max(active_workspace_bytes,
+                                          vision_plan->handoff_offset_bytes + active_handoff_bytes);
     }
     out.workspace = ArenaMemorySummary{workspace_storage.capacity(), active_workspace_bytes,
                                        std::max(work.peak_used(), workspace_logical_peak_bytes)};
-    if (workspace_plan.vision) {
+    if (vision_plan != nullptr) {
         out.vision_workspace = VisionWorkspaceMemorySummary{
             .aggregate_prompt_tokens = static_cast<std::uint32_t>(
                 std::min<std::uint64_t>(capacity, kMaximumPromptVisionTokens)),
-            .max_item_tokens        = workspace_plan.vision->max_merged_tokens,
-            .general_capacity_bytes = workspace_plan.vision->general_capacity_bytes,
-            .encode_peak_bytes      = workspace_plan.vision->encode_peak_bytes,
-            .handoff_offset_bytes   = workspace_plan.vision->handoff_offset_bytes,
-            .handoff_capacity_bytes = workspace_plan.vision->handoff_capacity_bytes,
+            .max_item_tokens        = vision_plan->max_merged_tokens,
+            .general_capacity_bytes = vision_plan->general_capacity_bytes,
+            .encode_peak_bytes      = vision_plan->encode_peak_bytes,
+            .handoff_offset_bytes   = vision_plan->handoff_offset_bytes,
+            .handoff_capacity_bytes = vision_plan->handoff_capacity_bytes,
             .handoff_active_bytes   = active_handoff_bytes,
             .handoff_peak_bytes     = vision_handoff_peak_bytes,
         };
@@ -752,12 +761,12 @@ void ProgramImpl::reset_memory_peaks() noexcept {
                 std::max(active_handoff_bytes, request.prefill->vision->active_handoff_bytes());
         }
     }
-    vision_handoff_peak_bytes    = active_handoff_bytes;
-    workspace_logical_peak_bytes = work.used();
-    if (workspace_plan.vision && active_handoff_bytes != 0) {
-        workspace_logical_peak_bytes =
-            std::max(workspace_logical_peak_bytes,
-                     workspace_plan.vision->handoff_offset_bytes + active_handoff_bytes);
+    vision_handoff_peak_bytes              = active_handoff_bytes;
+    workspace_logical_peak_bytes           = work.used();
+    const VisionWorkspacePlan* vision_plan = workspace_plan.rank_vision(0, vision_rank);
+    if (vision_plan != nullptr && active_handoff_bytes != 0) {
+        workspace_logical_peak_bytes = std::max(
+            workspace_logical_peak_bytes, vision_plan->handoff_offset_bytes + active_handoff_bytes);
     }
 }
 

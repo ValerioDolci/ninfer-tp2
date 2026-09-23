@@ -169,8 +169,9 @@ void mtp_bridge_multimodal(PrefillContext& state, const PreparedPromptData& prom
         composed_embedding = &visual_embedding;
     }
 
-    mtp_bridge_and_propose(state, bridge_token, *bridge.previous_hidden, nullptr, bridge.position,
-                           bridge.rope_position, false, composed_embedding);
+    mtp_bridge_and_propose(state, bridge_token, *bridge.previous_hidden,
+                           bridge.peer_previous_hidden, bridge.position, bridge.rope_position,
+                           false, composed_embedding);
 }
 
 void sample_from_hidden(PrefillContext& state, const Tensor& hidden, std::int32_t absolute_position,
@@ -679,9 +680,8 @@ void ProgramImpl::start_sequence(std::uint32_t lane, SequenceState& sequence,
         install_sampling(sequence, request, request_plan.sampling);
         sequence.rope_delta = staged.prompt.rope_delta;
         set_device_i32(io.rope_delta, sequence.rope_delta);
-        // Rank 1's copy of the per-sequence control, as the KV rows are published on every rank.
-        // Text prompts, the only ones tensor parallelism admits, have a zero delta; the MTP
-        // proposal steps offset rank 1's positions by the TextContext's copy of it.
+        // Rank 1's copy of the per-sequence control, as the KV rows are published on every rank;
+        // the MTP proposal steps offset rank 1's positions by it (TpExecution::rope_delta).
         if (peer) { set_peer_i32(peer->io.rope_delta, sequence.rope_delta); }
 
         request.timings              = {};
@@ -1109,9 +1109,10 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
             const Tensor peer_previous_hidden =
                 peer_retains_hidden() ? peer_tail_hidden(sequence) : Tensor{};
             const execution::MtpBridgeInput bridge{
-                .previous_hidden = &previous_hidden,
-                .position        = checked_i32(staged.base - 1, "MTP bridge position"),
-                .rope_position   = prompt_rope_position(staged.prompt, staged.base - 1),
+                .previous_hidden      = &previous_hidden,
+                .peer_previous_hidden = peer_retains_hidden() ? &peer_previous_hidden : nullptr,
+                .position             = checked_i32(staged.base - 1, "MTP bridge position"),
+                .rope_position        = prompt_rope_position(staged.prompt, staged.base - 1),
             };
             if (staged.vision) {
                 execution::mtp_bridge_multimodal(schedule_state, staged.prompt, *staged.vision,
@@ -1168,10 +1169,12 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
                 execution::PrefillChunkResult result;
                 timing.pause();
                 if (staged.vision) {
-                    if (!workspace_plan.vision) {
+                    const VisionWorkspacePlan* vision_plan =
+                        workspace_plan.rank_vision(0, vision_rank);
+                    if (vision_plan == nullptr) {
                         throw std::logic_error("active Vision prefill lost its workspace plan");
                     }
-                    mark_workspace_usage(workspace_plan.vision->capacity_bytes);
+                    mark_workspace_usage(vision_plan->capacity_bytes);
                     result = execution::prefill_multimodal_chunk(schedule_state, staged.prompt,
                                                                  *staged.vision, remaining,
                                                                  split_frontier, final_candidate);

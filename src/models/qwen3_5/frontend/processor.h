@@ -93,10 +93,18 @@ struct ProcessorOptions {
     double max_video_duration_seconds      = 600.0;
     std::uint64_t max_raw_patches          = kMaximumPromptVisionRawPatches;
     std::uint64_t max_vision_tokens        = kMaximumPromptVisionTokens;
-    double video_fps                       = 2.0;
-    int video_min_frames                   = 4;
-    int video_max_frames                   = 768;
+    // Merged-token ceiling of one item; the Vision encode workspace is planned for it.
+    std::uint64_t max_item_vision_tokens = kMaximumVisionItemTokens;
+    double video_fps                     = 2.0;
+    int video_min_frames                 = 4;
+    int video_max_frames                 = 768;
 };
+
+// Bounds one image or video item to `tokens` merged Vision tokens: the image and video pixel
+// ceilings become the pixels those tokens cover, so larger media are resized, and an item that
+// still exceeds them is rejected. Throws std::invalid_argument when `tokens` exceeds the per-item
+// execution ceiling or covers fewer pixels than the registered image or video minimum.
+void limit_item_vision_tokens(ProcessorOptions& options, std::uint64_t tokens);
 
 struct ProcessedInput {
     bool starts_in_reasoning = false;

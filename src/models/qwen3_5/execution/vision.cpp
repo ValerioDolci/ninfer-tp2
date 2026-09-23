@@ -2,6 +2,7 @@
 #include "models/qwen3_5/execution/vision.h"
 
 #include "core/device.h"
+#include "core/device_scope.h"
 #include "core/layout.h"
 #include "core/nvtx.h"
 #include "models/qwen3_5/program/vision_control.h"
@@ -264,6 +265,19 @@ VisionWorkspacePlan VisionContext::plan_workspace(const VisionConfig& config,
     return out;
 }
 
+VisionWorkspacePlan VisionContext::plan_receiver(const VisionWorkspacePlan& encode) {
+    if (encode.general_capacity_bytes == 0 || encode.handoff_capacity_bytes == 0) {
+        throw std::invalid_argument("Vision receiver needs a complete encode workspace plan");
+    }
+    VisionWorkspacePlan out = encode;
+    out.encode_peak_bytes   = 0;
+    out.handoff_offset_bytes =
+        align_up(encode.general_capacity_bytes, kWorkspaceAlignment, "receiver handoff offset");
+    out.capacity_bytes = checked_add(out.handoff_offset_bytes, out.handoff_capacity_bytes,
+                                     "receiver workspace capacity");
+    return out;
+}
+
 Tensor VisionContext::bind_output(DeviceSpan backing, const VisionWorkspacePlan& plan,
                                   std::size_t merged_tokens) {
     if (backing.data == nullptr || backing.bytes < plan.capacity_bytes || merged_tokens == 0 ||
@@ -420,18 +434,85 @@ void VisionContext::encode(const VisionItemView& item, Tensor& output, DeviceSpa
     }
 }
 
+namespace {
+
+// The rank that runs the encoder, after checking both ranks' bindings.
+const VisionRank& encoding_rank(const std::array<VisionRank, 2>& ranks, bool tensor_parallel,
+                                int vision_rank) {
+    const int count = tensor_parallel ? 2 : 1;
+    if (vision_rank < 0 || vision_rank >= count) {
+        throw std::invalid_argument("Vision prefill names no encoding rank");
+    }
+    for (int rank = 0; rank < count; ++rank) {
+        const VisionRank& binding = ranks[static_cast<std::size_t>(rank)];
+        if (binding.device == nullptr || binding.parameters == nullptr ||
+            binding.workspace_plan == nullptr) {
+            throw std::invalid_argument("Vision prefill rank binding is incomplete");
+        }
+    }
+    const VisionRank& encoder = ranks[static_cast<std::size_t>(vision_rank)];
+    if (!encoder.parameters->vision) {
+        throw std::invalid_argument("Vision prefill encoding rank holds no Vision tower");
+    }
+    return encoder;
+}
+
+} // namespace
+
 VisionPrefillSession::VisionPrefillSession(
     DeviceContext& device, const execution::Parameters& parameters, DeviceSpan workspace,
     const VisionWorkspacePlan& workspace_plan, qwen3_5::PreparedPromptData& prompt,
     const VisionPrefillPlan& plan, std::size_t& handoff_peak_bytes)
-    : device_(device), workspace_(workspace), workspace_plan_(workspace_plan), prompt_(prompt),
-      plan_(plan), handoff_peak_bytes_(handoff_peak_bytes), context_(device, parameters) {
+    : VisionPrefillSession(
+          std::array<VisionRank, 2>{VisionRank{&device, &parameters, workspace, &workspace_plan},
+                                    VisionRank{}},
+          false, 0, prompt, plan, handoff_peak_bytes) {}
+
+VisionPrefillSession::VisionPrefillSession(const VisionRank& rank0, const VisionRank& peer,
+                                           int vision_rank, qwen3_5::PreparedPromptData& prompt,
+                                           const VisionPrefillPlan& plan,
+                                           std::size_t& handoff_peak_bytes)
+    : VisionPrefillSession(std::array<VisionRank, 2>{rank0, peer}, true, vision_rank, prompt, plan,
+                           handoff_peak_bytes) {}
+
+VisionPrefillSession::VisionPrefillSession(const std::array<VisionRank, 2>& ranks,
+                                           bool tensor_parallel, int vision_rank,
+                                           qwen3_5::PreparedPromptData& prompt,
+                                           const VisionPrefillPlan& plan,
+                                           std::size_t& handoff_peak_bytes)
+    : ranks_(ranks), tensor_parallel_(tensor_parallel), vision_rank_(vision_rank), prompt_(prompt),
+      plan_(plan), handoff_peak_bytes_(handoff_peak_bytes),
+      context_(*encoding_rank(ranks, tensor_parallel, vision_rank).device,
+               *encoding_rank(ranks, tensor_parallel, vision_rank).parameters) {
     if (plan_.control == nullptr || plan_.control->items.empty() || plan_.uses.empty()) {
         throw std::invalid_argument("Vision prefill plan has no suffix item spans");
     }
-    if (workspace_.data == nullptr || workspace_.bytes < workspace_plan_.capacity_bytes ||
-        plan_.max_merged_count == 0 || plan_.max_merged_count > workspace_plan_.max_merged_tokens) {
-        throw std::invalid_argument("Vision prefill workspace plan is invalid");
+    const int rank_count = tensor_parallel_ ? 2 : 1;
+    for (int rank = 0; rank < rank_count; ++rank) {
+        const VisionRank& binding = ranks_[static_cast<std::size_t>(rank)];
+        if (binding.workspace.data == nullptr ||
+            binding.workspace.bytes < binding.workspace_plan->capacity_bytes ||
+            plan_.max_merged_count == 0 ||
+            plan_.max_merged_count > binding.workspace_plan->max_merged_tokens) {
+            throw std::invalid_argument("Vision prefill workspace plan is invalid");
+        }
+    }
+    if (tensor_parallel_) {
+        // The copy moves one item output from the encoding rank's handoff into the other's.
+        const VisionWorkspacePlan& first  = *ranks_[0].workspace_plan;
+        const VisionWorkspacePlan& second = *ranks_[1].workspace_plan;
+        if (ranks_[0].device == ranks_[1].device || first.output_hidden != second.output_hidden ||
+            first.max_merged_tokens != second.max_merged_tokens ||
+            first.handoff_capacity_bytes != second.handoff_capacity_bytes) {
+            throw std::invalid_argument("tensor-parallel Vision ranks disagree on the item output");
+        }
+        const VisionRank& encoder  = ranks_[static_cast<std::size_t>(vision_rank_)];
+        const VisionRank& receiver = ranks_[static_cast<std::size_t>(1 - vision_rank_)];
+        // Each event belongs to the device of the stream that records it; creating one makes its
+        // device current, which the scope restores.
+        const ScopedCurrentDevice restore;
+        encoded_.emplace(*encoder.device);
+        copied_.emplace(*receiver.device);
     }
     std::uint32_t previous_end = 0;
     std::optional<std::uint32_t> previous_item;
@@ -462,14 +543,19 @@ VisionPrefillSession::VisionPrefillSession(
         if (control.merged_count > plan_.max_merged_count) {
             throw std::invalid_argument("Vision suffix item exceeds its request workspace extent");
         }
-        const Tensor output =
-            VisionContext::bind_output(workspace_, workspace_plan_, control.merged_count);
         const std::size_t patch_elements = checked_mul(
             control.patch_count, static_cast<std::size_t>(context_.config().patch_width()),
             "item patch elements");
         const auto& payload = prompt_.media_payloads[use.prepared_item_index];
-        if (output.bytes() > workspace_plan_.handoff_capacity_bytes || !payload ||
-            payload->patch_elements != patch_elements) {
+        bool handoff_fits   = true;
+        for (int rank = 0; rank < rank_count; ++rank) {
+            const Tensor output = bind_rank_output(rank, control.merged_count);
+            handoff_fits =
+                handoff_fits &&
+                output.bytes() <=
+                    ranks_[static_cast<std::size_t>(rank)].workspace_plan->handoff_capacity_bytes;
+        }
+        if (!handoff_fits || !payload || payload->patch_elements != patch_elements) {
             throw std::invalid_argument("Vision suffix item storage has an invalid shape");
         }
         previous_end  = use.end;
@@ -484,6 +570,36 @@ VisionPrefillSession::VisionPrefillSession(
     }
     encoded_payloads_pending_release_.reserve(plan_.uses.size());
     timers_.reserve(plan_.uses.size());
+}
+
+Tensor VisionPrefillSession::bind_rank_output(int rank, std::size_t merged_tokens) const {
+    const VisionRank& binding = ranks_[static_cast<std::size_t>(rank)];
+    return VisionContext::bind_output(binding.workspace, *binding.workspace_plan, merged_tokens);
+}
+
+void VisionPrefillSession::encode_on_ranks(const VisionItemView& item, Tensor& rank0_output,
+                                           Tensor& peer_output) {
+    const VisionRank& encoder  = ranks_[static_cast<std::size_t>(vision_rank_)];
+    const VisionRank& receiver = ranks_[static_cast<std::size_t>(1 - vision_rank_)];
+    Tensor& encoded            = vision_rank_ == 0 ? rank0_output : peer_output;
+    const Tensor& received     = vision_rank_ == 0 ? peer_output : rank0_output;
+    // Kernel launches, events and timers follow the current device.
+    const ScopedCurrentDevice restore(encoder.device->device);
+    timers_.emplace_back(*encoder.device);
+    timers_.back().start();
+    context_.encode(item, encoded, encoder.workspace, *encoder.workspace_plan);
+    timers_.back().record_stop();
+    encoded_->record(encoder.device->stream);
+
+    ScopedCurrentDevice::select(receiver.device->device);
+    encoded_->wait(receiver.device->stream);
+    CUDA_CHECK(cudaMemcpyAsync(received.data, encoded.data, encoded.bytes(),
+                               cudaMemcpyDeviceToDevice, receiver.device->stream));
+    copied_->record(receiver.device->stream);
+
+    // The next item's encode overwrites the encoding rank's handoff only after the copy read it.
+    ScopedCurrentDevice::select(encoder.device->device);
+    copied_->wait(encoder.device->stream);
 }
 
 VisionChunk VisionPrefillSession::prepare_chunk(std::uint32_t begin, std::uint32_t nominal_length) {
@@ -505,24 +621,29 @@ VisionChunk VisionPrefillSession::prepare_chunk(std::uint32_t begin, std::uint32
     }
     if (end <= begin) { throw std::logic_error("Vision chunk cap made no forward progress"); }
     if (active == nullptr) {
-        return VisionChunk{static_cast<std::int32_t>(end - begin), nullptr, {}};
+        return VisionChunk{static_cast<std::int32_t>(end - begin), nullptr, {}, {}};
     }
     const qwen3_5::VisionItemControl& control = plan_.control->items[active->control_index];
-    Tensor output = VisionContext::bind_output(workspace_, workspace_plan_, control.merged_count);
+    Tensor output                             = bind_rank_output(0, control.merged_count);
+    Tensor peer_output = tensor_parallel_ ? bind_rank_output(1, control.merged_count) : Tensor{};
 
     if (!active_item_ || *active_item_ != active->prepared_item_index) {
         const auto& payload = prompt_.media_payloads[active->prepared_item_index];
-        timers_.emplace_back(device_);
-        timers_.back().start();
-        context_.encode(VisionItemView{payload->span(), &control}, output, workspace_,
-                        workspace_plan_);
-        timers_.back().record_stop();
+        const VisionItemView item{payload->span(), &control};
+        if (tensor_parallel_) {
+            encode_on_ranks(item, output, peer_output);
+        } else {
+            timers_.emplace_back(*ranks_[0].device);
+            timers_.back().start();
+            context_.encode(item, output, ranks_[0].workspace, *ranks_[0].workspace_plan);
+            timers_.back().record_stop();
+        }
         active_item_          = active->prepared_item_index;
         active_handoff_bytes_ = output.bytes();
         handoff_peak_bytes_   = std::max(handoff_peak_bytes_, active_handoff_bytes_);
         encoded_payloads_pending_release_.push_back(active->prepared_item_index);
     }
-    return VisionChunk{static_cast<std::int32_t>(end - begin), &control, output};
+    return VisionChunk{static_cast<std::int32_t>(end - begin), &control, output, peer_output};
 }
 
 void VisionPrefillSession::release_encoded_media_payloads() noexcept {

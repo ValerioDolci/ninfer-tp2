@@ -344,11 +344,26 @@ ProgramImpl::reserve_materialization(AdmissionCandidate&& plan, PreparedPromptDa
             if (!workspace_plan.vision) {
                 throw std::logic_error("Vision prefill has no startup workspace plan");
             }
-            request.prefill->vision = std::make_unique<execution::VisionPrefillSession>(
-                device, parameters,
-                DeviceSpan{workspace_storage.base(), workspace_storage.capacity()},
-                *workspace_plan.vision, request.prefill->prompt, *request.prefill->vision_plan,
-                vision_handoff_peak_bytes);
+            if (tensor_parallel()) {
+                // The tower's rank encodes each item; the other rank receives the embeddings.
+                const execution::VisionRank rank0{
+                    &device, &parameters,
+                    DeviceSpan{workspace_storage.base(), workspace_storage.capacity()},
+                    workspace_plan.rank_vision(0, vision_rank)};
+                const execution::VisionRank rank1{
+                    &peer->device, peer_parameters,
+                    DeviceSpan{peer->workspace_storage.base(), peer->workspace_storage.capacity()},
+                    workspace_plan.rank_vision(1, vision_rank)};
+                request.prefill->vision = std::make_unique<execution::VisionPrefillSession>(
+                    rank0, rank1, vision_rank, request.prefill->prompt,
+                    *request.prefill->vision_plan, vision_handoff_peak_bytes);
+            } else {
+                request.prefill->vision = std::make_unique<execution::VisionPrefillSession>(
+                    device, parameters,
+                    DeviceSpan{workspace_storage.base(), workspace_storage.capacity()},
+                    *workspace_plan.vision, request.prefill->prompt, *request.prefill->vision_plan,
+                    vision_handoff_peak_bytes);
+            }
         }
         request.prefill->elapsed_seconds =
             std::chrono::duration<double>(Clock::now() - host_started).count();
