@@ -335,6 +335,9 @@ runtime::ExecutionTiming ProgramImpl::append_forced_tokens(
                 }
             }
 
+            // The forced tokens prefill through the prefill KV row scalars, which a later bind or
+            // another lane's prefill step may have repointed; publish this lane's rows.
+            publish_kv_rows(sequence);
             std::uint32_t cursor = base;
             while (cursor < end) {
                 const std::uint32_t count           = std::min(prefill_chunk, end - cursor);
