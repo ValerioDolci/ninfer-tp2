@@ -180,9 +180,16 @@ void ProgramImpl::prepare_graphs() {
             CUDA_CHECK(cudaMemsetAsync(tensor.data, 0, tensor.bytes(), device.stream));
         }
         if (peer) {
+            std::vector<Tensor> peer_controls{peer->io.token, peer->io.pos, peer->io.rope_pos,
+                                              peer->io.rope_delta};
+            if (peer->io.mtp) {
+                peer_controls.push_back(peer->io.mtp->position);
+                peer_controls.push_back(peer->io.mtp->draft_tokens);
+                peer_controls.push_back(peer->io.mtp->target_input_ids);
+                peer_controls.push_back(peer->io.mtp->target_positions);
+            }
             const ScopedCurrentDevice rank1(peer->device.device);
-            for (const Tensor& tensor :
-                 {peer->io.token, peer->io.pos, peer->io.rope_pos, peer->io.rope_delta}) {
+            for (const Tensor& tensor : peer_controls) {
                 CUDA_CHECK(cudaMemsetAsync(tensor.data, 0, tensor.bytes(), peer->device.stream));
             }
         }
@@ -368,14 +375,22 @@ void ProgramImpl::prepare_graphs() {
                                              *io.mtp_decode,
                                              *mtp_host_ingress,
                                              *mtp_host_egress,
-                                             state_images->continuation_hidden_store()};
+                                             state_images->continuation_hidden_store(),
+                                             peer ? &*peer->io.mtp_decode : nullptr,
+                                             peer ? &peer->state_images->continuation_hidden_store()
+                                                  : nullptr};
         const GraphExecutionProfile code_warm = planned_profiles.front();
-        prepare_representative(code_warm.min, 1);
-        device.synchronize();
-        execution::mtp_decode_batch(
-            mtp_state, 1, draft_window,
-            mtp_causal_attention_envelopes(code_warm.max, draft_window, capacity), nullptr);
-        device.synchronize();
+        // As for ordinary rounds: every batch size is warmed eagerly on both devices at tp 2
+        // before any capture, since batch shape selects kernels.
+        const std::uint32_t warm_batches = tensor_parallel() ? max_concurrency : 1U;
+        for (std::uint32_t batch_size = 1; batch_size <= warm_batches; ++batch_size) {
+            prepare_representative(code_warm.min, batch_size);
+            synchronize_all();
+            execution::mtp_decode_batch(
+                mtp_state, static_cast<std::int32_t>(batch_size), draft_window,
+                mtp_causal_attention_envelopes(code_warm.max, draft_window, capacity), nullptr);
+            synchronize_all();
+        }
 
         mtp_graphs.profiles.reserve(planned_profiles.size() * max_concurrency);
         for (std::uint32_t batch_size = 1; batch_size <= max_concurrency; ++batch_size) {
