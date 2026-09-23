@@ -1006,6 +1006,9 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
             selectors.destination,
             staged.initial_mtp_extent,
             dflash_host_ingress};
+        // Forced tokens of another lane may have repointed the prefill KV row scalars since this
+        // lane's bind; every prefill step publishes its own rows.
+        publish_kv_rows(sequence);
 
         if (staged.mtp_bridge == MtpBridgeMode::BeforeSuffix) {
             if (staged.cursor != staged.base || staged.base == 0 ||
