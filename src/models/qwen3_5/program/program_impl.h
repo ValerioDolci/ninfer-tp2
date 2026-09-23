@@ -330,6 +330,9 @@ struct DecodeGraphProfile {
     std::uint32_t max_execution_frontier = 0;
     std::uint32_t topology_class         = 0;
     DecodeGraphDefinition definition;
+    // Set once cudaGraphExecUpdate has refused to swap this profile into its topology's
+    // executable, so the warning is printed once per profile, not at every swap.
+    bool update_rejected = false;
 };
 
 struct DecodeGraphTopology {
@@ -342,6 +345,13 @@ struct DecodeGraphFamily {
     std::vector<DecodeGraphProfile> profiles;
     std::vector<DecodeGraphTopology> topologies;
 };
+
+// Makes profile `profile_index` of `family` the one `topology` executes: an in-place
+// cudaGraphExecUpdate, or, when the update is rejected, a fresh instantiation of the profile's
+// definition (warned once per profile). Load (prepare_graphs) and every decode round that crosses
+// into another profile of the class go through here.
+void install_graph_definition(DecodeGraphFamily& family, DecodeGraphTopology& topology,
+                              std::size_t profile_index, const char* label);
 
 // Target model continuation for one logical sequence. This state remains meaningful after the
 // request which produced it has finished, so it is deliberately separate from request lifecycle,
