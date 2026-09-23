@@ -3,6 +3,7 @@
 
 #include "core/arena.h"
 #include "core/device.h"
+#include "core/device_scope.h"
 #include "core/gdn_replay_records.h"
 #include "core/host_kv_arena.h"
 #include "ninfer/ops/allreduce.h"
@@ -57,25 +58,6 @@ checkpoint_kind(RewriteCheckpointKind kind) noexcept {
     return kind == RewriteCheckpointKind::TurnClosure ? runtime::CheckpointKind::TurnClosure
                                                       : runtime::CheckpointKind::ResponseReplay;
 }
-
-// Makes `device` current for the scope and restores the caller's device. Tensor-parallel rank 1
-// storage and control uploads use it: cudaMalloc and stream-ordered copies target the current
-// device, while the Program otherwise runs with rank 0 current.
-class ScopedCurrentDevice {
-public:
-    explicit ScopedCurrentDevice(int device) {
-        CUDA_CHECK(cudaGetDevice(&previous_));
-        CUDA_CHECK(cudaSetDevice(device));
-    }
-
-    ~ScopedCurrentDevice() { (void)cudaSetDevice(previous_); }
-
-    ScopedCurrentDevice(const ScopedCurrentDevice&)            = delete;
-    ScopedCurrentDevice& operator=(const ScopedCurrentDevice&) = delete;
-
-private:
-    int previous_ = 0;
-};
 
 enum class RewriteCheckpointDisposition : std::uint8_t {
     RetainExisting,

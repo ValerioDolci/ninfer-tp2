@@ -627,7 +627,7 @@ auto dflash_decode_batch_body(DFlashBatchContext& state, std::int32_t batch_size
                 tp->replay_records == nullptr) {
                 throw std::logic_error("tensor-parallel DFlash decode requires rank 1's frame");
             }
-            const detail::ScopedCurrentDevice scope(rank1->device);
+            const ScopedCurrentDevice scope(rank1->device);
             CUDA_CHECK(cudaMemcpyAsync(state.peer_frame->ingress.data, &state.host_ingress,
                                        sizeof(qwen3_5::DFlashDecodeIngress), cudaMemcpyHostToDevice,
                                        rank1->stream));
@@ -665,7 +665,7 @@ auto dflash_decode_batch_body(DFlashBatchContext& state, std::int32_t batch_size
             // as the collectives' transfers are; nothing writes rank 0's drafts again this round.
             const ops::PeerEvents& events = *tp->events;
             CUDA_CHECK(cudaEventRecord(events.inputs_ready(0), stream));
-            const detail::ScopedCurrentDevice scope(rank1->device);
+            const ScopedCurrentDevice scope(rank1->device);
             CUDA_CHECK(cudaStreamWaitEvent(rank1->stream, events.inputs_ready(0), 0));
             qwen3_5::DFlashDecodeState& peer = *state.peer_frame;
             Tensor peer_drafts               = peer.draft_tokens.slice(1, 0, batch_size);
