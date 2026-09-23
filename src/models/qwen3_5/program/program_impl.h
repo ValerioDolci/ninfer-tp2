@@ -707,6 +707,8 @@ public:
 
     std::size_t workspace_logical_peak_bytes = 0;
     std::size_t vision_handoff_peak_bytes    = 0;
+    // MemorySummary::cuda_graph_observed_bytes, measured once by prepare_graphs().
+    std::array<std::size_t, 2> graph_observed_bytes{};
 
 private:
     void advance_resource_revision() noexcept {

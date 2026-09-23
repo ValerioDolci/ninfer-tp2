@@ -21,6 +21,14 @@ namespace {
 void validate_graph_profiles(const std::vector<GraphExecutionProfile>& profiles,
                              std::uint32_t max_frontier, const char* label);
 
+std::size_t free_device_bytes(int device) {
+    const ScopedCurrentDevice scope(device);
+    std::size_t free_bytes  = 0;
+    std::size_t total_bytes = 0;
+    CUDA_CHECK(cudaMemGetInfo(&free_bytes, &total_bytes));
+    return free_bytes;
+}
+
 template <class Prepare, class Synchronize>
 void instantiate_graph_family(DecodeGraphFamily& family, const char* label, DeviceContext& device,
                               Prepare&& prepare, Synchronize&& synchronize);
@@ -108,6 +116,19 @@ void instantiate_graph_family(DecodeGraphFamily& family, const char* label, Devi
 void ProgramImpl::prepare_graphs() {
     if (!use_cuda_graph) { return; }
     nvtx::ScopedRange prepare_range(nvtx::Name::CudaGraphPrepare, nvtx::Category::Graph);
+
+    // The planned graph allowance covers the installed executables and the driver and module
+    // state the eager warmups and captures materialize, so the observation spans all of it, on
+    // every rank. It is reported, not enforced.
+    const std::size_t ranks = peer ? 2U : 1U;
+    const auto rank_device  = [&](std::size_t rank) {
+        return rank == 0 ? device.device : peer->device.device;
+    };
+    synchronize_devices();
+    std::array<std::size_t, 2> free_before{};
+    for (std::size_t rank = 0; rank < ranks; ++rank) {
+        free_before[rank] = free_device_bytes(rank_device(rank));
+    }
 
     std::array<StateImageHandle, kMaximumConcurrency> capture_states{};
     for (std::uint32_t row = 0; row < max_concurrency; ++row) {
@@ -493,6 +514,11 @@ void ProgramImpl::prepare_graphs() {
     }
     CUDA_CHECK(cudaMemsetAsync(token_counts.data, 0, token_counts.bytes(), device.stream));
     synchronize_devices();
+    for (std::size_t rank = 0; rank < ranks; ++rank) {
+        const std::size_t free_after = free_device_bytes(rank_device(rank));
+        graph_observed_bytes[rank] =
+            free_before[rank] > free_after ? free_before[rank] - free_after : 0;
+    }
     for (std::uint32_t row = 0; row < max_concurrency; ++row) {
         if (!state_store->release(capture_states[row])) {
             throw std::logic_error("CUDA Graph capture StateImage could not be released");
