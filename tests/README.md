@@ -172,11 +172,17 @@ checks the draft acceptance and runs two-lane MTP rounds; its prefix-reuse legs 
 give the answer of the same prompt prefilled cold and of its exact (zero-suffix) repeat. Its
 `optimized_real` variant selects the optimized proposal head. The DFlash2 test (K=4, optimized
 proposal head) requires answers identical to the tp 2 model without speculation on three short
-prompts, a nonzero acceptance, two-lane DFlash2 rounds and prefix reuse across two turns:
+prompts, a nonzero acceptance, two-lane DFlash2 rounds and prefix reuse across two turns. The
+Vision test (`ninfer_qwen3_5_engine_vision_tp2_real_test`, artifact with the Vision tower) rejects
+a `vision_device` outside `devices`, requires a text answer identical with and without Vision,
+names the color of synthetic red and blue images with the tower on device 0, and requires the same
+token ids with the tower on device 1, where the embeddings are copied the other way; its
+`vision_tp2_mtp_real` and `vision_tp2_dflash2_real` variants serve the images with MTP and DFlash2
+and resume a second turn of the image conversation:
 
 ```bash
 NINFER_TEST_ARTIFACT=$PWD/out/qwen3_8_27b_nvfp4.ninfer \
-  ctest --test-dir build -R 'ninfer_qwen3_5_(engine_((mtp|dflash2)_)?tp2|sharded_load|text_context_tp2_real)' \
+  ctest --test-dir build -R 'ninfer_qwen3_5_(engine_((mtp|dflash2|vision)_)?tp2|sharded_load|text_context_tp2_real)' \
   --output-on-failure
 ```
 
