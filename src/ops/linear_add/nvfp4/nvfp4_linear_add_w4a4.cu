@@ -20,10 +20,9 @@ using M128N128Resident  = Nvfp4W4a4MmaSchedule<128, 128, 256, 4, 2, 1, 2>;
 
 // This projection selects its own route, so the layout the quantizer writes below must be derived
 // from the same predicate; the two are read together at the call site for that reason. The
-// two-device half [5120,8704] has no fused-residual TMA instance and stays on the MMA route.
-constexpr bool w4a4_tma_route(Nvfp4GeometryId problem, std::int32_t tokens) {
-    return problem != Nvfp4GeometryId::N5120K8704 && tokens >= 1024;
-}
+// two-device half [5120,8704] takes the TMA route at the same width as linear() over the same
+// shard, so the two ranks of a row-parallel projection run the same schedule.
+constexpr bool w4a4_tma_route(std::int32_t tokens) { return tokens >= 1024; }
 
 template <class Geometry, class Schedule>
 void launch_gemm(const Weight& weight, Tensor& residual, Nvfp4W4a4Workspace workspace,
@@ -65,7 +64,7 @@ void nvfp4_linear_add_w4a4_launch(const Tensor& x, const Weight& weight, Tensor&
                                   Nvfp4W4a4Workspace workspace, cudaStream_t stream) {
     const std::int32_t tokens     = x.ne[1];
     const Nvfp4GeometryId problem = resolve_nvfp4_geometry(weight.n, weight.k);
-    const bool tma                = w4a4_tma_route(problem, tokens);
+    const bool tma                = w4a4_tma_route(tokens);
     launch_nvfp4_w4a4_quantize(x, weight, workspace,
                                tma ? Nvfp4ScaleLayout::Tiled : Nvfp4ScaleLayout::RowMajor, stream);
     if (tma) {

@@ -175,11 +175,16 @@ void launch_nvfp4_w4a4_tma_linear_add(Nvfp4GeometryId problem, const std::uint8_
         launch_linear_add<Nvfp4N5120K17408>(activation_codes, activation_scales, weight_codes,
                                             weight_scales, residual, tokens, alpha, stream);
         return;
+    // The two-device input-column half of [5120,17408], with its parent's schedule: rank 0's
+    // linear_add then runs the same kernel as rank 1's linear() over the other half.
+    case Nvfp4GeometryId::N5120K8704:
+        launch_linear_add<Nvfp4N5120K8704>(activation_codes, activation_scales, weight_codes,
+                                           weight_scales, residual, tokens, alpha, stream);
+        return;
     case Nvfp4GeometryId::N14336K5120:
     case Nvfp4GeometryId::N16384K5120:
     case Nvfp4GeometryId::N34816K5120:
     case Nvfp4GeometryId::N17408K5120:
-    case Nvfp4GeometryId::N5120K8704:
         break;
     }
     throw std::logic_error("nvfp4 W4A4 TMA linear_add has no route for this geometry");
