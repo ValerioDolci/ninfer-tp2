@@ -83,8 +83,9 @@ enum class LinearPolicy : std::uint8_t {
  * `[5120,6144]`, and `[256,5120]` at every positive T. For two-device execution, FP8 also
  * registers the halves `[7168,5120]`, `[8192,5120]`, `[17408,5120]`, `[124160,5120]`,
  * `[5120,3072]` and `[5120,8704]`, NVFP4 registers `[17408,5120]` and `[5120,8704]`, and BF16
- * registers `[7168,5120]` and `[5120,3072]`, each at every positive T and resolving to the same
- * routes as the problem it halves. Text and MTP packed-weight problems accept
+ * registers `[7168,5120]` and `[5120,3072]`, each at every positive T and resolving to the
+ * routes of the problem it halves, except that FP8 `[5120,3072]` takes A8 from T=22, as
+ * linear_add() over the same half does. Text and MTP packed-weight problems accept
  * every positive column extent T. Registered Vision problems accept raw-patch P in
  * `{4,8,...,131072}` or merged-token V in `[1,32768]`; a matrix column does not inherently
  * represent a text token. FP32 is unsupported.
@@ -181,6 +182,7 @@ void linear_column_parallel(const std::array<Tensor, 2>& x, const std::array<Wei
                             const ExecutionContext& ec);
 
 /// A16-only column-parallel form; it requires no transient workspace.
+/// Model execution passes a policy; this form is the A16 entry the op qualification suites use.
 void linear_column_parallel(const std::array<Tensor, 2>& x, const std::array<Weight, 2>& w,
                             const std::array<Tensor, 2>& out, const ExecutionContext& ec);
 
@@ -220,6 +222,7 @@ void linear_row_parallel(const std::array<Tensor, 2>& x, const std::array<Weight
                          const ExecutionContext& ec, const PeerEvents& events);
 
 /// A16-only row-parallel form; it requires no transient workspace.
+/// Model execution passes a policy; this form is the A16 entry the op qualification suites use.
 void linear_row_parallel(const std::array<Tensor, 2>& x, const std::array<Weight, 2>& w,
                          const std::array<Tensor, 2>& out, const std::array<Tensor, 2>& staging,
                          const ExecutionContext& ec, const PeerEvents& events);
