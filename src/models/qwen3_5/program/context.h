@@ -59,6 +59,9 @@ struct PrefillContext {
     std::int32_t state_destination_slot                     = 0;
     std::uint32_t mtp_proposal_extent                       = 0;
     const qwen3_5::DFlashDecodeIngress* dflash_host_ingress = nullptr;
+    // Tensor-parallel width 2 under MTP: rank 1's column of the StateImage rank 0's
+    // `rewrite_checkpoint_hidden` names (the same slot of rank 1's mirror pool).
+    Tensor* peer_rewrite_checkpoint_hidden = nullptr;
 };
 
 struct OrdinaryBatchContext {

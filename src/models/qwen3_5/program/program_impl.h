@@ -1183,6 +1183,10 @@ private:
         std::span<const qwen3_5::detail::PressureDecision> shared_pressure_options,
         std::vector<HostKVPageReplicaRelease>* released_host_pages) const;
     void refresh_state_views(SequenceState& sequence);
+    // The Device slot of the StateImage holding `sequence`'s committed continuation (the Fork
+    // source while a Fork is pending); empty when either bound image is Host-only.
+    [[nodiscard]] std::optional<std::int32_t>
+    committed_state_slot(const SequenceState& sequence) const;
     void reserve_state_entitlement(SequenceState& sequence, std::uint32_t slots);
     void settle_state_fork(SequenceState& sequence);
     [[nodiscard]] detail::PhysicalResources
@@ -1212,7 +1216,19 @@ private:
     // Rank 1's copy of an I32 control scalar, uploaded on rank 1's stream.
     void set_peer_i32(Tensor& tensor, std::int32_t value);
     void attach_tensor_parallel_mirrors();
-    void copy_tail(SequenceState& sequence, const Tensor& source);
+    // Retains column `column` of the final-normed prefill chunk as `sequence`'s target tail
+    // hidden. At tensor-parallel width 2 under MTP, rank 1 retains the same column of its own
+    // chunk in the same StateImage slot of its mirror pool.
+    void copy_tail(SequenceState& sequence, std::int32_t column);
+
+    // True when rank 1 keeps its own copy of every retained target hidden: at tensor-parallel
+    // width 2 under MTP, whose bridge reads it on both ranks.
+    [[nodiscard]] bool peer_retains_hidden() const noexcept {
+        return peer != nullptr && speculative_backend == SpeculativeBackend::Mtp;
+    }
+
+    // Rank 1's copy of `sequence.tail_hidden` (peer_retains_hidden() only).
+    [[nodiscard]] Tensor peer_tail_hidden(const SequenceState& sequence) const;
     void copy_round_token();
     void
     commit_generated_prefix_identity(SequenceState& sequence, std::uint32_t base_ledger_frontier,

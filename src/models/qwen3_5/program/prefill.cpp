@@ -69,7 +69,8 @@ PrefillChunkResult prefill_text_chunk(PrefillContext& state, std::span<const Tok
                      state.execution.tp);
     configure_text_card(card, state.execution, state.sampling, state.state_source_slot,
                         state.state_destination_slot, state.mtp_proposal_extent);
-    card.set_rewrite_checkpoint_hidden_output(state.rewrite_checkpoint_hidden);
+    card.set_rewrite_checkpoint_hidden_output(state.rewrite_checkpoint_hidden,
+                                              state.peer_rewrite_checkpoint_hidden);
     card.set_prefill_split_frontier(split_frontier ? static_cast<std::int64_t>(*split_frontier)
                                                    : -1);
     const std::span<const int> prompt(ids.data(), ids.size());
@@ -93,7 +94,8 @@ PrefillChunkResult prefill_multimodal_chunk(PrefillContext& state, const Prepare
                      state.execution.tp);
     configure_text_card(card, state.execution, state.sampling, state.state_source_slot,
                         state.state_destination_slot, state.mtp_proposal_extent);
-    card.set_rewrite_checkpoint_hidden_output(state.rewrite_checkpoint_hidden);
+    card.set_rewrite_checkpoint_hidden_output(state.rewrite_checkpoint_hidden,
+                                              state.peer_rewrite_checkpoint_hidden);
     card.set_prefill_split_frontier(split_frontier ? static_cast<std::int64_t>(*split_frontier)
                                                    : -1);
     if (state.dflash != nullptr) {
@@ -648,6 +650,10 @@ void ProgramImpl::start_sequence(std::uint32_t lane, SequenceState& sequence,
         install_sampling(sequence, request, request_plan.sampling);
         sequence.rope_delta = staged.prompt.rope_delta;
         set_device_i32(io.rope_delta, sequence.rope_delta);
+        // Rank 1's copy of the per-sequence control, as the KV rows are published on every rank.
+        // Text prompts, the only ones tensor parallelism admits, have a zero delta; the MTP
+        // proposal steps offset rank 1's positions by the TextContext's copy of it.
+        if (peer) { set_peer_i32(peer->io.rope_delta, sequence.rope_delta); }
 
         request.timings              = {};
         request.pending              = {};
@@ -869,6 +875,25 @@ runtime::ExecutionTiming ProgramImpl::resolve_pending_raw(
                                                     device.stream);
             ops::scatter(selected, destinations, state_images->continuation_hidden_store(),
                          device.stream);
+            if (peer_retains_hidden()) {
+                // Rank 1's round verified the same columns into its own frame; it retains the
+                // same committed column of its own hidden in the same slots.
+                if (!peer->io.mtp_decode) {
+                    throw std::logic_error("tensor-parallel MTP commit has no rank 1 frame");
+                }
+                qwen3_5::MtpDecodeState& peer_frame = *peer->io.mtp_decode;
+                Tensor peer_selectors               = peer_frame.current_extents.slice(0, 0, batch);
+                Tensor peer_selected = peer_frame.target_continuation_hidden.slice(1, 0, batch);
+                const ScopedCurrentDevice rank1(peer->device.device);
+                CUDA_CHECK(cudaMemcpyAsync(peer_selectors.data, hidden_selectors.data(),
+                                           lanes.size() * sizeof(std::int32_t),
+                                           cudaMemcpyHostToDevice, peer->device.stream));
+                ops::speculative_select_accepted_hidden(peer_frame.target_hidden.slice(2, 0, batch),
+                                                        peer_selectors, peer_selected,
+                                                        peer->device.stream);
+                ops::scatter(peer_selected, peer_frame.state_destination_slots.slice(0, 0, batch),
+                             peer->state_images->continuation_hidden_store(), peer->device.stream);
+            }
         }
 
         if (is_masked_draft_backend(speculative_backend)) {
@@ -1004,11 +1029,24 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
         }
         StateImageSelectors selectors = state_selectors(sequence);
         Tensor rewrite_capture_hidden;
-        Tensor* rewrite_capture_hidden_ptr = nullptr;
-        if (staged.next_capture < staged.capture_groups.size()) {
+        Tensor peer_rewrite_capture_hidden;
+        Tensor* rewrite_capture_hidden_ptr      = nullptr;
+        Tensor* peer_rewrite_capture_hidden_ptr = nullptr;
+        // Each chunk that may reach a capture frontier retains the frontier's hidden in the
+        // destination StateImage; under MTP at tp 2 rank 1 retains its copy in the same slot.
+        const auto bind_rewrite_capture_hidden = [&] {
+            rewrite_capture_hidden_ptr      = nullptr;
+            peer_rewrite_capture_hidden_ptr = nullptr;
+            if (staged.next_capture >= staged.capture_groups.size()) { return; }
             rewrite_capture_hidden = state_images->continuation_hidden_slot(selectors.destination);
             rewrite_capture_hidden_ptr = &rewrite_capture_hidden;
-        }
+            if (peer_retains_hidden()) {
+                peer_rewrite_capture_hidden =
+                    peer->state_images->continuation_hidden_slot(selectors.destination);
+                peer_rewrite_capture_hidden_ptr = &peer_rewrite_capture_hidden;
+            }
+        };
+        bind_rewrite_capture_hidden();
         const std::optional<execution::TpExecution> tp = prefill_tp_binding(sequence);
         execution::PrefillContext schedule_state{
             {device, parameters, work, state_images->linear(),
@@ -1026,7 +1064,8 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
             selectors.source,
             selectors.destination,
             staged.initial_mtp_extent,
-            dflash_host_ingress};
+            dflash_host_ingress,
+            peer_rewrite_capture_hidden_ptr};
         // Forced tokens of another lane may have repointed the prefill KV row scalars since this
         // lane's bind; every prefill step publishes its own rows on every rank.
         publish_kv_rows(sequence);
@@ -1075,13 +1114,9 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
                 selectors                             = state_selectors(sequence);
                 schedule_state.state_source_slot      = selectors.source;
                 schedule_state.state_destination_slot = selectors.destination;
-                if (staged.next_capture < staged.capture_groups.size()) {
-                    rewrite_capture_hidden =
-                        state_images->continuation_hidden_slot(selectors.destination);
-                    schedule_state.rewrite_checkpoint_hidden = &rewrite_capture_hidden;
-                } else {
-                    schedule_state.rewrite_checkpoint_hidden = nullptr;
-                }
+                bind_rewrite_capture_hidden();
+                schedule_state.rewrite_checkpoint_hidden      = rewrite_capture_hidden_ptr;
+                schedule_state.peer_rewrite_checkpoint_hidden = peer_rewrite_capture_hidden_ptr;
 
                 const bool final_candidate = staged.cursor + remaining == staged.prompt_tokens;
                 const std::optional<std::uint32_t> capture_frontier =
@@ -1170,8 +1205,7 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
                 throw std::logic_error("staged prefill sampled before the prompt frontier");
             }
             timing.resume_submit();
-            copy_tail(sequence, prefill_hidden.slice(
-                                    1, static_cast<std::int32_t>(final_chunk_tokens) - 1, 1));
+            copy_tail(sequence, static_cast<std::int32_t>(final_chunk_tokens) - 1);
         } else {
             mark_workspace_usage(workspace_plan.ordinary_round);
             if (!sequence.tail_hidden_valid) {

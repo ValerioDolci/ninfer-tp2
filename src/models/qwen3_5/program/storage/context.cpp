@@ -1073,22 +1073,41 @@ bool ProgramImpl::state_exclusive_to_sequence(const SequenceState& sequence,
            owned_checkpoint_references(sequence, state);
 }
 
+std::optional<std::int32_t> ProgramImpl::committed_state_slot(const SequenceState& sequence) const {
+    if (!state_store->valid(sequence.state.read) || !state_store->valid(sequence.state.write) ||
+        state_store->residency(sequence.state.read) == StateReplicaResidency::HostOnly ||
+        state_store->residency(sequence.state.write) == StateReplicaResidency::HostOnly) {
+        return std::nullopt;
+    }
+    const StateImageHandle committed =
+        sequence.state.fork_pending ? sequence.state.read : sequence.state.write;
+    return state_store->physical_slot(committed);
+}
+
 void ProgramImpl::refresh_state_views(SequenceState& sequence) {
     sequence.tail_hidden               = {};
     sequence.rewrite_checkpoint_hidden = {};
-    if (state_store->valid(sequence.state.read) && state_store->valid(sequence.state.write) &&
-        state_store->residency(sequence.state.read) != StateReplicaResidency::HostOnly &&
-        state_store->residency(sequence.state.write) != StateReplicaResidency::HostOnly) {
-        const StateImageHandle committed =
-            sequence.state.fork_pending ? sequence.state.read : sequence.state.write;
-        sequence.tail_hidden =
-            state_images->continuation_hidden_slot(state_store->physical_slot(committed));
+    if (const std::optional<std::int32_t> slot = committed_state_slot(sequence)) {
+        sequence.tail_hidden = state_images->continuation_hidden_slot(*slot);
     }
     if (sequence.rewrite_state && state_store->valid(*sequence.rewrite_state) &&
         state_store->residency(*sequence.rewrite_state) != StateReplicaResidency::HostOnly) {
         sequence.rewrite_checkpoint_hidden = state_images->continuation_hidden_slot(
             state_store->physical_slot(*sequence.rewrite_state));
     }
+}
+
+Tensor ProgramImpl::peer_tail_hidden(const SequenceState& sequence) const {
+    if (!peer_retains_hidden()) {
+        throw std::logic_error("tensor-parallel rank 1 retains no target hidden");
+    }
+    const std::optional<std::int32_t> slot = committed_state_slot(sequence);
+    // Rank 0's view is refreshed with every binding change; the same slot names rank 1's copy.
+    if (!slot || sequence.tail_hidden.data == nullptr ||
+        state_images->continuation_hidden_slot(*slot).data != sequence.tail_hidden.data) {
+        throw std::logic_error("sequence tail hidden does not name its committed StateImage");
+    }
+    return peer->state_images->continuation_hidden_slot(*slot);
 }
 
 void ProgramImpl::reserve_state_entitlement(SequenceState& sequence, std::uint32_t slots) {
