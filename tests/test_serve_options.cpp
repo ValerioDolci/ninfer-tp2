@@ -379,6 +379,10 @@ int main() {
                       "--tp 2 rejected explicit zero Host tiers");
     failures += check(serve_usage_text("ninfer-serve").find("--tp") != std::string::npos,
                       "serve help omits --tp");
+    failures += check(split.tp_mailbox && !parse({"ninfer-serve", "model.ninfer", "--tp", "2",
+                                                  "--devices", "0,1", "--no-tp-mailbox"})
+                                               .tp_mailbox,
+                      "--no-tp-mailbox did not disable the captured mailbox transport");
 
     if (failures == 0) { std::cout << "ok\n"; }
     return failures == 0 ? 0 : 1;

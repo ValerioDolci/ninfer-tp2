@@ -83,7 +83,7 @@ std::string serve_usage_text(const char* argv0) {
            "[--response-store-max-records N] [--response-store-max-mib N] "
            "[--kv-dtype bf16|int8|fp8|nvfp4|k8v4] [--spec mtp|dflash|dflash2 --draft-tokens N] "
            "[--default-max-tokens N] [--default-thinking-budget N] "
-           "[--vision] [--no-cuda-graph] [--no-prefix-reuse] "
+           "[--vision] [--no-cuda-graph] [--no-tp-mailbox] [--no-prefix-reuse] "
            "[--chat-template FILE] [--lm-head-draft] [--no-thinking] [--preserve-thinking] "
            "[--cors] "
            "[--temperature F] [--top-p F] [--top-k N] [--min-p F] [--presence-penalty F] "
@@ -113,6 +113,7 @@ std::string serve_usage_text(const char* argv0) {
            "ordinary, --spec mtp or --spec dflash2 --lm-head-draft decoding with bf16 or int8 KV; "
            "it defaults device-state to "
            "max(2x concurrency,8), private to max(2x concurrency,8) and the Host tiers to 0\n"
+           "       --no-tp-mailbox keeps the captured --tp 2 all-reduces on cross-device copies\n"
            "       --device-state-slots is extra checkpoint capacity beyond active lanes; "
            "--host-kv-mib uses MiB\n"
            "       --default-thinking-budget caps model-origin thinking for enabled requests; "
@@ -300,6 +301,8 @@ ServeOptions parse_serve_options(int argc, char** argv) {
             options.enable_vision = true;
         } else if (arg == "--no-cuda-graph") {
             options.use_cuda_graph = false;
+        } else if (arg == "--no-tp-mailbox") {
+            options.tp_mailbox = false;
         } else if (arg == "--no-prefix-reuse") {
             options.allow_prefix_reuse = false;
         } else if (arg == "--lm-head-draft") {
