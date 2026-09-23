@@ -490,6 +490,24 @@ std::unique_ptr<Program> create_program(const execution::Parameters& parameters,
     return std::unique_ptr<Program>(new Program(std::move(impl)));
 }
 
+std::unique_ptr<Program> create_program(const execution::Parameters& parameters,
+                                        const execution::Parameters& peer_parameters,
+                                        SequencePlan&& plan, ExecutionContext& execution,
+                                        const StartupObserver& startup_observer) {
+    if (plan.impl_ == nullptr) { throw std::invalid_argument("sequence plan is empty"); }
+    if (plan.impl_->parameters != &parameters) {
+        throw std::invalid_argument("sequence plan belongs to another model instance");
+    }
+    if (execution.tp != 2 || plan.impl_->tp != 2 || !execution.dev[0] || !execution.dev[1]) {
+        throw std::invalid_argument("tensor-parallel Program requires a two-device plan and "
+                                    "ExecutionContext");
+    }
+    auto impl = std::make_unique<detail::ProgramImpl>(
+        parameters, *plan.impl_, *execution.dev[0], startup_observer, &execution, &peer_parameters);
+    plan.impl_.reset();
+    return std::unique_ptr<Program>(new Program(std::move(impl)));
+}
+
 } // namespace ninfer::models::qwen3_5
 
 namespace ninfer::models::qwen3_5 {

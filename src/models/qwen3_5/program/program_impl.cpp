@@ -35,8 +35,25 @@ std::uint32_t normalized_private_capacity(const ContextCacheOptions& options) {
 
 } // namespace
 
+ProgramImpl::PeerRuntime::PeerRuntime(DeviceContext& peer_device, const SequencePlanImpl& plan)
+    : device(peer_device), persistent(plan.persistent.bytes),
+      workspace_storage(plan.workspace.capacity),
+      work(DeviceSpan{workspace_storage.base(), plan.workspace.general_capacity}) {
+    const DeviceSpan backing = persistent.alloc_bytes(plan.persistent.bytes, 256);
+    decoder = std::make_unique<qwen3_5::DecoderState>(backing, plan.persistent.decoder);
+    state_images =
+        std::make_unique<qwen3_5::StateImageDevicePool>(backing, plan.persistent.state_images);
+    io = qwen3_5::RoundState(backing, plan.persistent.round);
+    if (!io.ordinary) {
+        throw std::logic_error("tensor-parallel rank 1 has no ordinary decode frame");
+    }
+    ordinary = execution::ordinary_peer_frame(*io.ordinary);
+}
+
 ProgramImpl::ProgramImpl(const execution::Parameters& parameters_in, const SequencePlanImpl& plan,
-                         DeviceContext& device_in, const StartupObserver& startup_observer)
+                         DeviceContext& device_in, const StartupObserver& startup_observer,
+                         ExecutionContext* execution_in,
+                         const execution::Parameters* peer_parameters_in)
     : parameters(parameters_in), device(device_in), capacity(plan.capacity),
       kv_capacity(plan.kv_capacity), max_concurrency(plan.max_concurrency),
       context_cache(plan.context_cache),
@@ -85,6 +102,48 @@ ProgramImpl::ProgramImpl(const execution::Parameters& parameters_in, const Seque
          workspace_plan.vision->general_capacity_bytes != workspace_plan.general_capacity)) {
         throw std::invalid_argument("Qwen3.5 workspace plan does not match startup features");
     }
+    if (plan.tp != 1 && plan.tp != execution::kTensorParallelWidth) {
+        throw std::invalid_argument("Qwen3.5 Program tensor-parallel width must be 1 or 2");
+    }
+    if ((plan.tp == execution::kTensorParallelWidth) !=
+            (execution_in != nullptr && peer_parameters_in != nullptr) ||
+        (execution_in != nullptr && execution_in->tp != plan.tp)) {
+        throw std::invalid_argument(
+            "Qwen3.5 Program execution context does not match the sequence plan width");
+    }
+    if (execution_in != nullptr) {
+        if (!execution_in->dev[0] || !execution_in->dev[1] || &*execution_in->dev[0] != &device ||
+            &peer_parameters_in->model != &parameters.model || peer_parameters_in->device != 1 ||
+            parameters.device != 0 || parameters.model.device_count() != plan.tp) {
+            throw std::invalid_argument(
+                "tensor-parallel Program requires rank 0 and rank 1 Parameters of one two-device "
+                "Model on its ExecutionContext");
+        }
+        // Rank 1's KV pages and StateImages are mirrors of rank 0's and have no Host replica, so
+        // neither Host tier can hold a complete checkpoint.
+        if (plan.context_cache.host_state_slots != 0 ||
+            plan.context_cache.host_kv_capacity_bytes != 0) {
+            throw std::invalid_argument(
+                "tensor-parallel Program requires Host state slots and Host KV capacity of 0");
+        }
+        if (speculative_backend != SpeculativeBackend::None || vision_enabled || causal_scoring) {
+            throw std::invalid_argument(
+                "tensor-parallel Program supports ordinary generation only");
+        }
+        execution_context = execution_in;
+        peer_parameters   = peer_parameters_in;
+        {
+            // cudaMalloc is neither stream-ordered nor capturable: rank 1's storage is allocated
+            // once, here, with rank 1 current.
+            const ScopedCurrentDevice rank1(execution_context->dev[1]->device);
+            peer = std::make_unique<PeerRuntime>(*execution_context->dev[1], plan);
+            peer_events.emplace(*execution_context);
+            if (use_cuda_graph) {
+                graph_bridge.emplace(execution_context->dev[0]->device,
+                                     execution_context->dev[1]->device);
+            }
+        }
+    }
     const DeviceSpan backing = persistent.alloc_bytes(plan.persistent.bytes, 256);
     if (!plan.context_cache.max_private_continuations || !plan.context_cache.max_shared_prefixes) {
         throw std::logic_error("Qwen3.5 context cache options are not normalized");
@@ -124,6 +183,7 @@ ProgramImpl::ProgramImpl(const execution::Parameters& parameters_in, const Seque
         decoder->text_kv.execution_tables().logical_page_capacity());
     state_images =
         std::make_unique<qwen3_5::StateImageDevicePool>(backing, plan.persistent.state_images);
+    if (peer) { attach_tensor_parallel_mirrors(); }
     if (plan.context_cache.host_state_slots != 0) {
         const std::uint64_t host_state_bytes =
             static_cast<std::uint64_t>(state_images->host_layout().image_bytes) *
@@ -260,6 +320,19 @@ ProgramImpl::ProgramImpl(const execution::Parameters& parameters_in, const Seque
 
     set_device_i32(io.text_kv_table_row, 0);
     if (!causal_scoring) { set_device_i32(io.backend_kv_table_row, 0); }
+    if (peer) {
+        set_peer_i32(peer->io.text_kv_table_row, 0);
+        tp_execution.emplace(execution::TpExecution{
+            .execution         = execution_context,
+            .events            = &*peer_events,
+            .parameters        = peer_parameters,
+            .work              = &peer->work,
+            .linear_attention  = &peer->state_images->linear(),
+            .text_cache        = &peer->decoder->text_kv,
+            .text_kv_table_row = peer->io.text_kv_table_row,
+            .ordinary          = &peer->ordinary,
+        });
+    }
 
     host_tokens = round_host ? static_cast<TokenId*>(round_host->data()) : nullptr;
     if (ordinary_host) {
@@ -299,7 +372,7 @@ ProgramImpl::ProgramImpl(const execution::Parameters& parameters_in, const Seque
         CUDA_CHECK(
             cudaMemsetAsync(sampling_config.data, 0, sampling_config.bytes(), device.stream));
     }
-    device.synchronize();
+    synchronize_devices();
     if (use_cuda_graph) {
         StartupPhaseScope graph_phase(startup_observer, StartupPhase::CudaGraphPrepare);
         prepare_graphs();
@@ -307,12 +380,44 @@ ProgramImpl::ProgramImpl(const execution::Parameters& parameters_in, const Seque
     }
     work.reset();
     work.reset_peak();
+    if (peer) { peer->work.reset(); }
     workspace_logical_peak_bytes = 0;
 }
 
 ProgramImpl::~ProgramImpl() noexcept {
+    if (peer) {
+        if (peer->device.transfer_stream != nullptr) {
+            (void)cudaStreamSynchronize(peer->device.transfer_stream);
+        }
+        if (peer->device.stream != nullptr) { (void)cudaStreamSynchronize(peer->device.stream); }
+    }
     if (device.transfer_stream != nullptr) { (void)cudaStreamSynchronize(device.transfer_stream); }
     if (device.stream != nullptr) { (void)cudaStreamSynchronize(device.stream); }
+}
+
+void ProgramImpl::attach_tensor_parallel_mirrors() {
+    // Rank 0's pools own all page, row and slot bookkeeping; every physical mutation they issue
+    // (page zero/copy, execution-row acquire/release/publication, StateImage zero/copy) is
+    // replayed at the same indices on rank 1's pool, on rank 1's stream. Attached before any
+    // mutation, so both ranks start from the same, empty addressing.
+    const DeviceContext& rank1 = peer->device;
+    const DeviceKVMirror where{.device = rank1.device, .stream = rank1.stream};
+    decoder->text_kv.page_pool().attach_mirror(peer->decoder->text_kv.page_pool(), where);
+    decoder->text_kv.execution_tables().attach_mirror(peer->decoder->text_kv.execution_tables(),
+                                                      where);
+    state_images->attach_mirror(*peer->state_images, rank1.device, rank1.stream);
+}
+
+void ProgramImpl::synchronize_devices() const {
+    if (peer) { peer->device.synchronize(); }
+    device.synchronize();
+}
+
+void ProgramImpl::set_peer_i32(Tensor& tensor, std::int32_t value) {
+    if (!peer) { throw std::logic_error("tensor-parallel rank 1 is unavailable"); }
+    const ScopedCurrentDevice rank1(peer->device.device);
+    CUDA_CHECK(cudaMemcpyAsync(tensor.data, &value, sizeof(value), cudaMemcpyHostToDevice,
+                               peer->device.stream));
 }
 
 std::vector<float> ProgramImpl::causal_score(PreparedPromptData&& prompt,

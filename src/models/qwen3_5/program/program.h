@@ -17,7 +17,8 @@
 
 namespace ninfer {
 struct DeviceContext;
-}
+struct ExecutionContext;
+} // namespace ninfer
 
 namespace ninfer::models::qwen3_5 {
 
@@ -945,6 +946,9 @@ private:
 
     friend std::unique_ptr<Program> create_program(const execution::Parameters&, SequencePlan&&,
                                                    DeviceContext&, const StartupObserver&);
+    friend std::unique_ptr<Program> create_program(const execution::Parameters&,
+                                                   const execution::Parameters&, SequencePlan&&,
+                                                   ExecutionContext&, const StartupObserver&);
 };
 
 namespace detail {
@@ -1101,6 +1105,15 @@ struct RuntimeContractAccess {
 
 [[nodiscard]] std::unique_ptr<Program> create_program(const execution::Parameters& parameters,
                                                       SequencePlan&& plan, DeviceContext& device,
+                                                      const StartupObserver& startup_observer);
+
+// Tensor-parallel width 2: `parameters` and `peer_parameters` are Parameters(model, 0) and
+// Parameters(model, 1) of one two-device Model; rank r executes on execution.dev[r]. The plan
+// must come from a planner configured with tp 2.
+[[nodiscard]] std::unique_ptr<Program> create_program(const execution::Parameters& parameters,
+                                                      const execution::Parameters& peer_parameters,
+                                                      SequencePlan&& plan,
+                                                      ExecutionContext& execution,
                                                       const StartupObserver& startup_observer);
 
 } // namespace ninfer::models::qwen3_5

@@ -2,8 +2,10 @@
 #include "models/qwen3_5/program/internal.h"
 
 #include "core/arena.h"
+#include "core/device.h"
 #include "core/gdn_replay_records.h"
 #include "core/host_kv_arena.h"
+#include "ninfer/ops/allreduce.h"
 #include "ninfer/ops/gdn_replay.h"
 #include "ninfer/ops/sampling.h"
 #include "core/decode_graph.h"
@@ -17,6 +19,7 @@
 #include "models/qwen3_5/program/prefix_identity.h"
 #include "models/qwen3_5/program/planning/resource_projection.h"
 #include "models/qwen3_5/execution/text.h"
+#include "models/qwen3_5/execution/tp.h"
 #include "models/qwen3_5/execution/vision.h"
 #include "models/qwen3_5/program/vision_prefill.h"
 
@@ -54,6 +57,25 @@ checkpoint_kind(RewriteCheckpointKind kind) noexcept {
     return kind == RewriteCheckpointKind::TurnClosure ? runtime::CheckpointKind::TurnClosure
                                                       : runtime::CheckpointKind::ResponseReplay;
 }
+
+// Makes `device` current for the scope and restores the caller's device. Tensor-parallel rank 1
+// storage and control uploads use it: cudaMalloc and stream-ordered copies target the current
+// device, while the Program otherwise runs with rank 0 current.
+class ScopedCurrentDevice {
+public:
+    explicit ScopedCurrentDevice(int device) {
+        CUDA_CHECK(cudaGetDevice(&previous_));
+        CUDA_CHECK(cudaSetDevice(device));
+    }
+
+    ~ScopedCurrentDevice() { (void)cudaSetDevice(previous_); }
+
+    ScopedCurrentDevice(const ScopedCurrentDevice&)            = delete;
+    ScopedCurrentDevice& operator=(const ScopedCurrentDevice&) = delete;
+
+private:
+    int previous_ = 0;
+};
 
 enum class RewriteCheckpointDisposition : std::uint8_t {
     RetainExisting,
@@ -456,8 +478,12 @@ public:
         qwen3_5::ContinuationSummary continuation_summary;
     };
 
+    // `execution_in` and `peer_parameters_in` are null at tensor-parallel width 1. At width 2
+    // `device` is execution_in->dev[0] and `peer_parameters_in` is Parameters(model, 1).
     ProgramImpl(const execution::Parameters& parameters, const SequencePlanImpl& plan,
-                DeviceContext& device, const StartupObserver& startup_observer);
+                DeviceContext& device, const StartupObserver& startup_observer,
+                ExecutionContext* execution_in                  = nullptr,
+                const execution::Parameters* peer_parameters_in = nullptr);
     ~ProgramImpl() noexcept;
 
     [[nodiscard]] RequestBasePlan plan_request(const PreparedPromptData& prompt,
@@ -577,6 +603,46 @@ public:
     const std::size_t kv_payload_bytes;
     const std::size_t graph_allowance_bytes;
     const WorkspacePlan workspace_plan;
+
+    // Tensor-parallel rank 1 (width 2 only). It holds the same persistent and workspace layout as
+    // rank 0 on ExecutionContext::dev[1]; its KV page pool, KV execution tables and StateImages
+    // are mirrors that rank 0's pools drive, so rank 0's bookkeeping names both ranks' storage.
+    // Only the Text KV, the GDN/hidden StateImages, the prefill KV row and the ordinary decode
+    // frame are read on rank 1. Declared before rank 0's storage so it is destroyed after it:
+    // rank 0's execution tables hold rank 1's row leases until they are destroyed, and rank 0's
+    // graphs hold rank 1 nodes and events.
+    struct PeerRuntime {
+        PeerRuntime(DeviceContext& device, const SequencePlanImpl& plan);
+
+        DeviceContext& device;
+        DeviceArena persistent;
+        DeviceArena workspace_storage;
+        WorkspaceArena work;
+        std::unique_ptr<qwen3_5::DecoderState> decoder;
+        std::unique_ptr<qwen3_5::StateImageDevicePool> state_images;
+        qwen3_5::RoundState io;
+        execution::OrdinaryPeerFrame ordinary;
+    };
+
+    ExecutionContext* execution_context          = nullptr;
+    const execution::Parameters* peer_parameters = nullptr;
+    std::unique_ptr<PeerRuntime> peer;
+    std::optional<ops::PeerEvents> peer_events;
+    std::optional<DecodeGraphPeerBridge> graph_bridge;
+    std::optional<execution::TpExecution> tp_execution;
+
+    [[nodiscard]] bool tensor_parallel() const noexcept { return peer != nullptr; }
+
+    [[nodiscard]] const execution::TpExecution* tp_binding() const noexcept {
+        return tp_execution ? &*tp_execution : nullptr;
+    }
+
+    [[nodiscard]] const DecodeGraphPeerBridge* graph_peer_bridge() const noexcept {
+        return graph_bridge ? &*graph_bridge : nullptr;
+    }
+
+    // Waits for rank 1 and then rank 0; at width 1 only rank 0.
+    void synchronize_devices() const;
 
     DeviceArena persistent;
     DeviceArena workspace_storage;
@@ -1134,6 +1200,9 @@ private:
     void install_sampling(SequenceState& sequence, RequestControl& request,
                           const ops::SamplingConfig& config);
     void set_device_i32(Tensor& tensor, std::int32_t value);
+    // Rank 1's copy of an I32 control scalar, uploaded on rank 1's stream.
+    void set_peer_i32(Tensor& tensor, std::int32_t value);
+    void attach_tensor_parallel_mirrors();
     void copy_tail(SequenceState& sequence, const Tensor& source);
     void copy_round_token();
     void
@@ -1169,7 +1238,7 @@ private:
                                         std::uint32_t backend_pages);
     void bind_sequence_kv(SequenceState& sequence);
     // Uploads the active sequence's Text and backend KV execution rows into the prefill control
-    // scalars.
+    // scalars of every rank.
     void publish_kv_rows(const SequenceState& sequence);
     void unbind_sequence_kv(SequenceState& sequence) noexcept;
     void ensure_sequence_kv_mapped(SequenceState& sequence, std::uint32_t main_tokens,

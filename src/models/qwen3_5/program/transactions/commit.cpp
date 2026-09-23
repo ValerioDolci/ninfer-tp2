@@ -344,7 +344,8 @@ runtime::ExecutionTiming ProgramImpl::append_forced_tokens(
             }
 
             // The forced tokens prefill through the prefill KV row scalars, which a later bind or
-            // another lane's prefill step may have repointed; publish this lane's rows.
+            // another lane's prefill step may have repointed; publish this lane's rows on every
+            // rank.
             publish_kv_rows(sequence);
             std::uint32_t cursor = base;
             while (cursor < end) {
@@ -353,7 +354,7 @@ runtime::ExecutionTiming ProgramImpl::append_forced_tokens(
                 execution::PrefillContext schedule_state{
                     {device, parameters, work, state_images->linear(),
                      replay_records ? &*replay_records : nullptr, io, prefill_hidden, prefill_chunk,
-                     proposal_head},
+                     proposal_head, tp_binding(), graph_peer_bridge()},
                     text_kv_view(sequence),
                     mtp_kv_view(sequence),
                     decoder->text_kv,
@@ -392,7 +393,7 @@ runtime::ExecutionTiming ProgramImpl::append_forced_tokens(
                               1, static_cast<std::int32_t>(result.processed_tokens) - 1, 1));
             }
             timing.begin_wait();
-            device.synchronize();
+            synchronize_devices();
             timing.end_wait();
             work.reset();
 
@@ -417,7 +418,7 @@ runtime::ExecutionTiming ProgramImpl::append_forced_tokens(
     } catch (...) {
         timing.begin_wait();
         try {
-            device.synchronize();
+            synchronize_devices();
         } catch (...) {}
         timing.end_wait();
         work.reset();

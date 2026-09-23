@@ -1420,6 +1420,16 @@ void ProgramImpl::publish_kv_rows(const SequenceState& sequence) {
         sequence.kv->backend ? backend_kv_addresses->bound_row(*sequence.kv->backend) : 0;
     set_device_i32(io.text_kv_table_row, row);
     set_device_i32(io.backend_kv_table_row, backend_row);
+    if (peer) {
+        // Rank 1's prefill reads its own row scalar. Its execution tables are rank 0's mirror, so
+        // the row index is the same; it is written whenever rank 0's is.
+        const KVExecutionRowLease& peer_row = decoder->text_kv.execution_tables().mirror_row(
+            text_kv_addresses->execution_row(sequence.kv->text).handle());
+        if (peer_row.row_index() != row) {
+            throw std::logic_error("tensor-parallel KV execution rows disagree across ranks");
+        }
+        set_peer_i32(peer->io.text_kv_table_row, row);
+    }
 }
 
 void ProgramImpl::unbind_sequence_kv(SequenceState& sequence) noexcept {
