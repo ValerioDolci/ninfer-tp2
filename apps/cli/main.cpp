@@ -278,6 +278,8 @@ int main(int argc, char** argv) {
         engine_options.kv_cache           = cli.kv_cache;
         engine_options.speculative        = cli.speculative;
         engine_options.enable_vision      = cli.enable_vision;
+        engine_options.vision_device      = cli.vision_device;
+        engine_options.max_vision_tokens  = cli.max_vision_tokens;
         engine_options.use_cuda_graph     = cli.use_cuda_graph;
         engine_options.tp_mailbox         = cli.tp_mailbox;
         // One CLI invocation owns exactly one request, so retained cross-request context has no

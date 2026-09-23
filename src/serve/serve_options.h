@@ -48,7 +48,9 @@ struct ServeOptions {
     KvCacheStorage kv_cache = KvCacheStorage::BFloat16;
     SpeculativeOptions speculative;
     ContextCacheOptions context_cache;
-    bool enable_vision      = false;
+    bool enable_vision = false;
+    std::optional<int> vision_device;               // CUDA device of the Vision tower
+    std::optional<std::uint32_t> max_vision_tokens; // merged-token ceiling of one media item
     bool use_cuda_graph     = true;
     bool tp_mailbox         = true;
     bool allow_prefix_reuse = true;
