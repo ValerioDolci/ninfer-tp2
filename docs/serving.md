@@ -783,6 +783,8 @@ The table lists executable defaults. The startup example selects a long-context 
 | `--default-max-tokens N` | output limit when omitted by a request | `8192` |
 | `--default-thinking-budget N` | positive thinking cap inherited by thinking-enabled requests | unset |
 | `--vision` | enable media input and load Vision GPU allocations | off |
+| `--vision-device N` | CUDA device that holds the Vision tower and encodes; one of `--devices` at `--tp 2`; see [Two GPUs](#two-gpus) | `--device` |
+| `--max-vision-tokens N` | merged Vision tokens of one image or video item (`64..16384`); larger media are resized and the encode workspace is planned for `N` | `16384` |
 | `--no-cuda-graph` | disable CUDA Graph decode | graphs on |
 | `--no-tp-mailbox` | keep the captured `--tp 2` all-reduces on cross-device copies; see [Two GPUs](#two-gpus) | mailbox on |
 | `--no-prefix-reuse` | disable compatible-prefix caching | prefix reuse on |
@@ -909,9 +911,33 @@ the recurrent-state commit run on both ranks, and acceptance and sampling run on
 `--lm-head-draft` is required: the full output head is split by vocabulary across the ranks,
 while the drafter ranks its candidates over one complete head.
 
-Tensor parallelism covers ordinary decoding, `--spec mtp` and `--spec dflash2 --lm-head-draft`
-with `bf16` or `int8` KV. `--spec dflash`, `--spec dflash2` without `--lm-head-draft`, `--vision`,
-the MoE architecture and the `fp8`, `nvfp4` and `k8v4` KV types are rejected at startup.
+`--vision` works at `--tp 2` with every supported decoding mode. The Vision tower is loaded on one
+GPU only, `--vision-device` (default: rank 0's device, `A`); that GPU encodes each image or video
+item once and copies the merged embeddings to the other GPU, and both ranks then prefill the prompt
+with the same embeddings:
+
+```bash
+./build/apps/ninfer-serve models/qwen3_8_27b_nvfp4.ninfer \
+  --tp 2 --devices 0,1 --vision --vision-device 1 --max-vision-tokens 4096 \
+  --max-context 32768 --kv-capacity auto \
+  --max-concurrency 2 --kv-dtype int8 --spec mtp --draft-tokens 3
+```
+
+The copy goes through host memory without peer access, like the all-reduces, and costs about
+10 KiB per Vision token. Only the tower's GPU holds the Vision weights and the encode workspace; the
+other GPU holds just the handoff buffer the embeddings land in (`hidden x 2` bytes per token of the
+largest item). `--kv-capacity auto` credits the other GPU with the encode workspace it does not
+allocate, so pick the GPU with more free memory (the one without a display) as `--vision-device`.
+The encode workspace grows with the item extent: `--max-vision-tokens` below the `16384` default
+resizes larger images and videos to that many tokens and shrinks the workspace accordingly. MTP
+and DFlash2 compose with Vision as on one GPU: the MTP head and its prefix-reuse bridge read the
+visual columns on rank 0, where its token embedding lives, and the DFlash2 drafter reads rank 0's
+target features.
+
+Tensor parallelism covers ordinary decoding, `--spec mtp` and `--spec dflash2 --lm-head-draft`,
+each with or without `--vision`, with `bf16` or `int8` KV. `--spec dflash`, `--spec dflash2`
+without `--lm-head-draft`, the MoE architecture and the `fp8`, `nvfp4` and `k8v4` KV types are
+rejected at startup, and so is a `--vision-device` outside `--devices`.
 
 Serve writes human-readable operational records to stderr using
 `YYYY-MM-DD HH:MM:SS.mmm  LEVEL  message`. Normal output covers material startup milestones,

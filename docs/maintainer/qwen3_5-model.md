@@ -290,10 +290,10 @@ reads its KV row from `TpExecution::text_kv_table_row`; ordinary decode reads
 `TpExecution::ordinary`, which the Program uploads from the same host ingress record as rank 0's.
 KV page and row bookkeeping stay on rank 0 and are mirrored to rank 1 at the same indices.
 
-The split path covers text prefill, ordinary decode, the MTP and DFlash2 rounds and their logits.
-It rejects DFlash, multimodal prefill, the MoE FFN, paired (two-parent) input projections, and KV
-caches other than BF16 and INT8-G64, for which the 12/2-head attention has no route. RoPE has no
-per-rank override.
+The split path covers text and multimodal prefill, ordinary decode, the MTP and DFlash2 rounds and
+their logits. It rejects DFlash, the MoE FFN, paired (two-parent) input projections, and KV caches
+other than BF16 and INT8-G64, for which the 12/2-head attention has no route. RoPE has no per-rank
+override.
 
 MTP runs the same pattern over its one layer, with the MTP's own shards and KV pages:
 
@@ -336,9 +336,29 @@ pool, so checkpoint Forks, Moves and copies carry it with rank 0's. The MTP brid
 prefix runs the split head from each rank's retained copy (`TextContext::mtp_forward_batch` over
 rank arrays) and appends both ranks' MTP K/V at the bridge position. A zero-suffix reuse samples
 its first token through the vocabulary-split head from rank 0's retained hidden, which rank 1
-pulls across devices once, so it needs no rank 1 copy and works for every backend. Tensor
-parallelism admits text prompts only, so the per-sequence RoPE delta is zero; start_sequence
-still publishes it to rank 1.
+pulls across devices once, so it needs no rank 1 copy and works for every backend. Rank 1 keeps
+its own copy of the per-sequence RoPE delta (`TpExecution::rope_delta`): start_sequence publishes
+it with rank 0's and every prefill chunk rewrites both, and the prompt proposal steps offset each
+rank's positions by its own copy.
+
+Vision is not split. `vision/*` is placed whole on `LoadOptions::vision_rank` (the index of
+`EngineOptions::vision_device` in `devices`, rank 0 by default), so only that rank's Parameters
+hold `vision`. The encoding rank's workspace follows the single-device Vision plan (general
+prefix, encode region, item-output handoff); the other rank's (`WorkspacePlan::vision_receiver`,
+`VisionContext::plan_receiver`) is its general prefix followed by a handoff of the same extent,
+with no encode region. The per-rank reservation carries the encoding rank's workspace, and the KV
+resolution credits the other rank with the difference
+(`SequencePlanner::unallocated_reservation_bytes`). `VisionPrefillSession` encodes an item once,
+on the encoding rank's stream; the other rank's stream waits on an event for the encode, copies
+the `[H,V]` merged embeddings into its own handoff (`cudaMemcpyAsync`, staged through host memory
+without peer access), and records a second event the encoding rank's stream waits on before it may
+overwrite its handoff. The `VisionChunk` names both copies. The split multimodal prefill scatters each rank's copy
+into its own residual at the chunk's visual columns (the hidden axis is replicated, so both ranks
+hold the same embeddings) and uploads the three-axis M-RoPE positions to both ranks. Under MTP the
+shifted visual overlap is scattered into rank 0's composed input embedding, the only embedding the
+split MTP stem reads; the prompt MTP head, its final column and the prefix-reuse bridge accept
+`[T,3]` positions, and a visual bridge column passes its composed embedding to rank 0. A DFlash2
+tap reads rank 0's residual as for text.
 
 DFlash2 splits only the target. The drafter (`dflash2/*`) and the optimized proposal head
 (`proposal/*`) are placed on rank 0 alone, and the full-head proposal is rejected at width 2

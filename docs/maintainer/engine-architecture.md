@@ -560,8 +560,11 @@ rank 1 在 `ProgramImpl::PeerRuntime` 中分配与 rank 0 相同的 per-rank per
 上发布同一个 prefill KV row；decode 把同一个 host ingress 上传到两个 rank 的 frame。CUDA Graph 把
 rank 1 的 stream fork/join 进 rank 0 的同一次 capture，launch 前以 rank 1 已提交的 mirror 工作为 gate。
 两个 rank 保留相同的 runtime reservation，KV 容量按空闲显存较少的 rank 求解。当前支持 dense 架构的
-ordinary、MTP 与 DFlash2（需 `--lm-head-draft`；drafter 只在 rank 0 运行）生成，KV 为 `bf16`/`int8`；
-DFlash、Vision、CausalScoring 与 MoE 在启动时拒绝。Prefix reuse 与单卡相同，包括 zero-suffix 与 MTP
+ordinary、MTP 与 DFlash2（需 `--lm-head-draft`；drafter 只在 rank 0 运行）生成，可带 Vision，KV 为
+`bf16`/`int8`；DFlash、CausalScoring 与 MoE 在启动时拒绝。Vision tower 与 encode workspace 只在
+`vision_rank`（`--vision-device`）上：该 rank 编码每个 item，merged embeddings 由另一 rank 的 stream
+经事件排序复制到它自己的 handoff，两个 rank 各自 scatter 自己的副本；另一 rank 不分配 encode 区域，
+KV 求解时按差额为其预算加回。Prefix reuse 与单卡相同，包括 zero-suffix 与 MTP
 bridge：MTP 下 rank 1 在同一 StateImage slot 保留自己的 target hidden 副本，zero-suffix 的首个 token
 经词表切分的 output head 采样。没有 Host 层时 private prefill capture 的回收规则见
 [资源调度与上下文缓存](resource-scheduling-and-context-cache.md#101-retention-policy)。

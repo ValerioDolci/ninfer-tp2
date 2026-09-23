@@ -218,6 +218,8 @@ The table lists executable defaults. The examples above select FP8 KV and MTP3.
 | `--draft-tokens N` | MTP `1..5`; DFlash/DFlash2 `1..15` | unset |
 | `--lm-head-draft` | optimized proposal head | off |
 | `--vision` | enable image/video input and load Vision GPU allocations | off |
+| `--vision-device N` | CUDA device that holds the Vision tower and encodes; one of `--devices` at `--tp 2` | `--device` |
+| `--max-vision-tokens N` | merged Vision tokens of one image or video item (`64..16384`); larger media are resized | `16384` |
 | `--no-cuda-graph` | disable CUDA Graph decode | graphs on |
 | `--no-tp-mailbox` | keep the captured `--tp 2` all-reduces on cross-device copies; see [Two GPUs](#two-gpus) | mailbox on |
 | `--chat-template FILE` | use a local Jinja template | artifact template |
@@ -293,7 +295,10 @@ may reuse the full backing before producing the output; Text/MTP/decode work rem
 general prefix while the handoff is live. The capacity is therefore the maximum legal simultaneous
 extent, not the sum of Text, Vision scratch, and Vision output allocations. Text prefill uses
 `min(--prefill-chunk,--max-context)`; Vision keeps the existing 32,768-token aggregate prompt budget
-but plans Device execution for the registered 16,384-token maximum single item. Requests perform no
+but plans Device execution for the registered 16,384-token maximum single item, or for
+`--max-vision-tokens N`: images and videos larger than `N` tokens are then resized to at most `N`
+(one token per 32x32 pixels of an image or of two video frames), a video too long for `N` tokens is
+rejected, and the encode workspace shrinks with `N`. Requests perform no
 project-owned device allocation or growth. Context-cache capacity controls are intentionally absent
 from this one-request interface; the persistent Engine and server routes own cross-request reuse and
 optional Host backing.
@@ -323,5 +328,17 @@ Tensor parallelism covers ordinary decoding, `--spec mtp` and `--spec dflash2` o
 architecture with `bf16` or `int8` KV. The MTP head is split like a Text layer and verification
 runs on both ranks; `--draft-tokens` and `--lm-head-draft` work as on one GPU. The DFlash2 drafter
 runs on rank 0 alone and requires `--lm-head-draft`, since the full output head is split by
-vocabulary across the ranks. `--spec dflash`, `--vision`, the MoE architecture and the `fp8`,
-`nvfp4` and `k8v4` KV types are rejected at startup.
+vocabulary across the ranks. `--spec dflash`, the MoE architecture and the `fp8`, `nvfp4` and
+`k8v4` KV types are rejected at startup.
+
+`--vision` works at `--tp 2` with each of these modes. The Vision tower and its encode workspace
+live on one GPU, `--vision-device` (default `A`), which must be one of `--devices`: it encodes each
+image or video item once and copies the merged embeddings to the other GPU, which holds only the
+buffer they land in. `--kv-capacity auto` sizes the KV pool from each GPU's own share, so the
+tower's GPU pays for it alone; `--max-vision-tokens` shrinks the encode workspace.
+
+```bash
+./build/apps/ninfer models/qwen3_8_27b_nvfp4.ninfer --tp 2 --devices 0,1 \
+  --vision --vision-device 1 --max-context 8192 \
+  --messages examples/cli/messages/image_chart.json
+```
