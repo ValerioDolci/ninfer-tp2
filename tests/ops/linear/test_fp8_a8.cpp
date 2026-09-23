@@ -80,17 +80,22 @@ int run_fp8_a8() {
     };
     failures += run_shape("FP8_A8", ActivationCompute::A8, make_fp8_weight,
                           {17408, 5120, 867U, Comparison::Sampled, true, mlp_shard_invocations});
-    constexpr std::array residual_shard_invocations{
+    // The output half takes the A8 floor of the fused residual projection its peer rank runs.
+    constexpr std::array output_shard_invocations{
+        Invocation{22, CallForm::Policy, ops::LinearPolicy::AllowA8},
+        Invocation{24, CallForm::Policy, ops::LinearPolicy::AllowA8},
+        Invocation{65, CallForm::Policy, ops::LinearPolicy::AllowA4},
+        Invocation{1024, CallForm::Policy, ops::LinearPolicy::AllowA8},
+    };
+    failures += run_shape("FP8_A8", ActivationCompute::A8, make_fp8_weight,
+                          {5120, 3072, 869U, Comparison::Sampled, true, output_shard_invocations});
+    constexpr std::array down_shard_invocations{
         Invocation{25, CallForm::Policy, ops::LinearPolicy::AllowA8},
         Invocation{65, CallForm::Policy, ops::LinearPolicy::AllowA4},
         Invocation{1024, CallForm::Policy, ops::LinearPolicy::AllowA8},
     };
-    failures +=
-        run_shape("FP8_A8", ActivationCompute::A8, make_fp8_weight,
-                  {5120, 3072, 869U, Comparison::Sampled, true, residual_shard_invocations});
-    failures +=
-        run_shape("FP8_A8", ActivationCompute::A8, make_fp8_weight,
-                  {5120, 8704, 871U, Comparison::Sampled, true, residual_shard_invocations});
+    failures += run_shape("FP8_A8", ActivationCompute::A8, make_fp8_weight,
+                          {5120, 8704, 871U, Comparison::Sampled, true, down_shard_invocations});
 
     struct Problem {
         std::int32_t rows;

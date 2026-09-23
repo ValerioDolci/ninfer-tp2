@@ -2,8 +2,11 @@
 #include "ops/linear/fp8/fp8_launch.cuh"
 
 namespace ninfer::ops::detail {
-// Two-device input-column half of [5120,6144]. It inherits the parent's measured schedules and
-// route thresholds; they have not been re-measured at this shape.
+// Two-device input-column half of [5120,6144]. It inherits the parent's measured schedules; they
+// have not been re-measured at this shape. Its A8 floor is instead the fused residual projection's
+// (fp8_linear_add_plan.cpp), not linear()'s 25: at tp 2 rank 1 runs this linear() and rank 0
+// runs linear_add over the other half of the same row-parallel projection, so the two ranks take
+// the same activation route at every width, as tp 1's single linear_add [5120,6144] does.
 namespace {
 using Geometry = Fp8Geometry<5120, 3072>;
 using Gemv     = Fp8GemvSchedule<8, 2, 8, 4, Fp8CodeCache::Default, 2, 2>;
@@ -49,7 +52,7 @@ Fp8Launch select_a16(std::int32_t tokens) {
     throw std::logic_error("fp8 A16 chunk exceeds shape capacity");
 }
 
-bool uses_a8(std::int32_t, std::int32_t max_tokens) { return max_tokens >= 25; }
+bool uses_a8(std::int32_t, std::int32_t max_tokens) { return max_tokens >= 22; }
 } // namespace
 
 const Fp8LinearShape kFp8N5120K3072{5120, 3072, launch_fp8_a16_chunks<24, select_a16>,
