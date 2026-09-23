@@ -57,7 +57,8 @@ ninfer::EngineOptions engine_options(const char* artifact, bool vision,
     options.device               = 0;
     options.devices              = {0, 1};
     options.max_context          = kMaxContext;
-    options.kv_capacity          = ninfer::KvCapacityPolicy::explicit_capacity(2 * kMaxContext);
+    // One lane: the KV pool holds exactly one max_context sequence.
+    options.kv_capacity          = ninfer::KvCapacityPolicy::explicit_capacity(kMaxContext);
     options.prefill_chunk        = 1024;
     options.max_concurrency      = 1;
     options.max_pending_requests = 2;
