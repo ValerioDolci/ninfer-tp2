@@ -1,12 +1,15 @@
 #include "options.h"
 #include "product/speculative_options.h"
+#include "product/tensor_parallel_options.h"
 
 #include <cerrno>
 #include <cmath>
 #include <cstdlib>
 #include <limits>
 #include <stdexcept>
+#include <string>
 #include <string_view>
+#include <vector>
 
 namespace ninfer::cli {
 namespace {
@@ -83,7 +86,7 @@ std::string usage_text(const char* argv0) {
     return std::string("usage: ") + argv0 +
            " <model.ninfer> (--prompt <text>|--messages <messages.json>)\n"
            "       [--max-context N] [--kv-capacity N|auto] [--prefill-chunk N] [--max-new N]\n"
-           "       [--device N]\n"
+           "       [--device N] [--tp 1|2 --devices A,B]\n"
            "       [--kv-dtype bf16|int8|fp8|nvfp4|k8v4] [--spec mtp|dflash|dflash2 --draft-tokens "
            "N]\n"
            "       [--lm-head-draft]\n"
@@ -100,6 +103,8 @@ std::string usage_text(const char* argv0) {
            "Structured message content accepts text, image/image_url, and video/video_url parts;\n"
            "media sources may be local paths, HTTP(S) URLs, or base64 data URIs.\n"
            "--vision enables image/video input and loads the fixed Vision GPU allocations.\n"
+           "--tp 2 --devices A,B splits the dense model across two GPUs (rank 0 on A);\n"
+           "tensor parallelism supports ordinary decoding with bf16 or int8 KV only.\n"
            "--thinking-budget caps model-origin thinking tokens; inserted control tokens count "
            "toward --max-new.\n"
            "--kv-capacity auto leaves " +
@@ -118,6 +123,7 @@ Options parse_options(int argc, char** argv) {
     if (argc < 2) { throw std::invalid_argument(".ninfer model path is required"); }
     options.artifact_path     = argv[1];
     bool kv_capacity_explicit = false;
+    bool device_explicit      = false;
 
     for (int i = 2; i < argc; ++i) {
         const std::string_view arg(argv[i]);
@@ -142,7 +148,12 @@ Options parse_options(int argc, char** argv) {
         } else if (arg == "--prefill-chunk") {
             options.prefill_chunk = parse_u32(value(arg), "prefill-chunk");
         } else if (arg == "--device") {
-            options.device = parse_device(value(arg));
+            options.device  = parse_device(value(arg));
+            device_explicit = true;
+        } else if (arg == "--tp") {
+            options.tp = product::parse_tp(value(arg));
+        } else if (arg == "--devices") {
+            options.devices = product::parse_devices(value(arg));
         } else if (arg == "--kv-dtype") {
             options.kv_cache = parse_kv_cache(value(arg));
         } else if (arg == "--spec") {
@@ -210,6 +221,8 @@ Options parse_options(int argc, char** argv) {
     if (!kv_capacity_explicit) {
         options.kv_capacity = KvCapacityPolicy::explicit_capacity(options.max_context);
     }
+    product::resolve_tensor_parallel_devices(options.tp, options.devices, options.device,
+                                             device_explicit);
 
     const bool has_prompt   = !options.prompt.empty();
     const bool has_messages = !options.messages_path.empty();

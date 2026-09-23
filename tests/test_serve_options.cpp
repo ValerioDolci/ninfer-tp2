@@ -2,6 +2,7 @@
 #include "serve/translate.h"
 
 #include <iostream>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
@@ -347,6 +348,37 @@ int main() {
     }
     failures += check(!secret_present, "startup argv retained the API key");
     failures += check(redaction_present, "startup argv omitted the API-key redaction marker");
+
+    const ServeOptions split =
+        parse({"ninfer-serve", "model.ninfer", "--tp", "2", "--devices", "0,1"});
+    failures += check(split.tp == 2 && split.devices == std::vector<int>{0, 1} &&
+                          split.device == 0 && split.context_cache.host_state_slots == 0 &&
+                          split.context_cache.host_kv_capacity_bytes == 0,
+                      "--tp 2 did not select both ranks with the Host tiers off");
+    failures += check(defaults.tp == 1 && defaults.devices == std::vector<int>{0},
+                      "serve default is not one rank on device 0");
+    const auto rejects = [](std::vector<std::string> arguments) {
+        try {
+            (void)parse(std::move(arguments));
+        } catch (const std::invalid_argument&) { return true; }
+        return false;
+    };
+    failures += check(rejects({"ninfer-serve", "model.ninfer", "--tp", "2"}),
+                      "--tp 2 was accepted without --devices");
+    failures += check(rejects({"ninfer-serve", "model.ninfer", "--tp", "2", "--devices", "0,1",
+                               "--host-state-slots", "4"}),
+                      "--tp 2 accepted nonzero Host state slots");
+    failures += check(rejects({"ninfer-serve", "model.ninfer", "--tp", "2", "--devices", "0,1",
+                               "--host-kv-mib", "1024"}),
+                      "--tp 2 accepted a nonzero Host KV capacity");
+    failures += check(
+        rejects({"ninfer-serve", "model.ninfer", "--device", "1", "--tp", "2", "--devices", "0,1"}),
+        "--device disagreeing with the rank 0 device was accepted");
+    failures += check(!rejects({"ninfer-serve", "model.ninfer", "--tp", "2", "--devices", "0,1",
+                                "--host-state-slots", "0", "--host-kv-mib", "0"}),
+                      "--tp 2 rejected explicit zero Host tiers");
+    failures += check(serve_usage_text("ninfer-serve").find("--tp") != std::string::npos,
+                      "serve help omits --tp");
 
     if (failures == 0) { std::cout << "ok\n"; }
     return failures == 0 ? 0 : 1;
