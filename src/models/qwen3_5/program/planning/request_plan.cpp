@@ -536,6 +536,17 @@ std::optional<AdmissionCandidate> ProgramImpl::inspect_lane(
         }
     }
 
+    if (tensor_parallel() && plan->reuse != ReusePath::Root) {
+        // A zero-suffix reuse samples its first token from the retained hidden
+        // (sample_from_hidden), which has no vocabulary-split head, and the speculative bridges
+        // resume a draft head from a hidden only rank 0 holds. Declining costs one prefill from
+        // an earlier checkpoint or the root instead of a failed request.
+        if (plan->reuse_base >= plan->summary.prompt_tokens ||
+            speculative_backend != SpeculativeBackend::None) {
+            return std::nullopt;
+        }
+    }
+
     if (speculative_backend == SpeculativeBackend::Mtp) {
         const bool append_ready =
             plan->reuse == ReusePath::PrivateEndpoint && source != nullptr &&
@@ -549,7 +560,11 @@ std::optional<AdmissionCandidate> ProgramImpl::inspect_lane(
             ((source != nullptr && source->mtp_kv_valid >= plan->reuse_base - 1) ||
              (shared_source != nullptr && shared_source->backend_frontier >= plan->reuse_base - 1));
         if (plan->reuse != ReusePath::Root && !append_ready && !checkpoint_ready) {
-            throw std::logic_error("published MTP checkpoint is not materializable");
+            if (!tensor_parallel()) {
+                throw std::logic_error("published MTP checkpoint is not materializable");
+            }
+            // At tp 2 a catalog entry this backend cannot resume is a miss, not a fault.
+            return std::nullopt;
         }
     }
 
@@ -563,7 +578,10 @@ std::optional<AdmissionCandidate> ProgramImpl::inspect_lane(
          (shared_source != nullptr &&
           (!shared_source->kv || (backend_kv_cache() && !shared_source->kv->backend) ||
            shared_source->frontier < plan->reuse_base)))) {
-        throw std::logic_error("published DFlash checkpoint is not materializable");
+        if (!tensor_parallel()) {
+            throw std::logic_error("published DFlash checkpoint is not materializable");
+        }
+        return std::nullopt;
     }
 
     const std::optional<RewriteCheckpointSpec>& desired = base.rewrite_checkpoint;

@@ -82,6 +82,9 @@ struct SequencePlanningInputs {
     bool use_cuda_graph = true;
     bool causal_scoring = false;
     int device          = 0;
+    // Tensor-parallel width. At 2 every layout below is one rank's: KV heads, GDN channels and
+    // value heads are halved, and both ranks allocate the same layout.
+    int tp = 1;
     ContextCacheOptions context_cache;
 };
 
@@ -104,10 +107,12 @@ struct SequencePlanImpl {
     bool use_cuda_graph = true;
     bool causal_scoring = false;
     int device          = 0;
+    int tp              = 1;
     ContextCacheOptions context_cache;
     PersistentLayout persistent;
     WorkspacePlan workspace;
-    std::size_t graph_allowance_bytes    = 0;
+    std::size_t graph_allowance_bytes = 0;
+    // Per rank: at tp 2 each device reserves this many bytes.
     std::size_t device_reservation_bytes = 0;
 };
 
