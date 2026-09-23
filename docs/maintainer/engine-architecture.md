@@ -546,7 +546,8 @@ Prefill 成本按硬件类别与实际 Text/Vision 配置、绑定、Use 派生�
 ### 8.1 双 GPU 张量并行
 
 `EngineOptions.tp = 2` 时 Engine 为 `devices` 中的每个 rank 建立一个 `DeviceContext`，组成
-`ExecutionContext`，并在驱动允许时启用 peer access（否则 collectives 经 host staging 复制）。
+`ExecutionContext`，并在驱动允许时启用 peer access（否则 collectives 经 host staging 复制；CUDA Graph
+中单个请求激活的 all-reduce 经 pinned host mailbox 交换）。
 加载得到一个双设备 Model；`ModelInstance` 持有 rank 0 与 rank 1 的 `execution::Parameters`。
 Scheduler、ResourceManager、admission、sampling 和 request 输出仍然只在 rank 0，Engine 语义与单卡相同。
 

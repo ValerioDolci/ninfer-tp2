@@ -86,6 +86,8 @@ struct SequencePlanningInputs {
     // value heads are halved, and both ranks allocate the same layout except the masked drafter's
     // state, which only rank 0 holds.
     int tp = 1;
+    // At tp 2 with CUDA Graphs: captured all-reduces use the PeerMailbox transport.
+    bool tp_mailbox = true;
     ContextCacheOptions context_cache;
 };
 
@@ -109,6 +111,7 @@ struct SequencePlanImpl {
     bool causal_scoring = false;
     int device          = 0;
     int tp              = 1;
+    bool tp_mailbox     = true;
     ContextCacheOptions context_cache;
     // Rank 0's persistent layout, and at tp 2 rank 1's: the same layout without the masked
     // drafter's state (DFlashPersistentLayout and the StateImage DFlash local slots).
