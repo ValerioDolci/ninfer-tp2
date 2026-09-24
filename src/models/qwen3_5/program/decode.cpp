@@ -135,7 +135,10 @@ DecodeGraphExecutable& install_graph_profile(DecodeGraphFamily& family, DecodeGr
                                              const char* label) {
     DecodeGraphTopology& topology   = select_graph_topology(family, profile.topology_class, label);
     const std::size_t profile_index = static_cast<std::size_t>(&profile - family.profiles.data());
-    install_graph_definition(family, topology, profile_index, label);
+    if (topology.installed_profile != profile_index) {
+        topology.executable.update(profile.definition);
+        topology.installed_profile = profile_index;
+    }
     return topology.executable;
 }
 

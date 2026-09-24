@@ -76,7 +76,10 @@ void instantiate_graph_family(DecodeGraphFamily& family, const char* label, Devi
     }
 
     const auto install_and_upload = [&](DecodeGraphTopology& topology, std::size_t profile_index) {
-        install_graph_definition(family, topology, profile_index, label);
+        if (topology.installed_profile != profile_index) {
+            topology.executable.update(family.profiles[profile_index].definition);
+            topology.installed_profile = profile_index;
+        }
         topology.executable.upload(device.stream);
         synchronize();
     };
@@ -110,37 +113,9 @@ void instantiate_graph_family(DecodeGraphFamily& family, const char* label, Devi
 
 } // namespace
 
-void install_graph_definition(DecodeGraphFamily& family, DecodeGraphTopology& topology,
-                              std::size_t profile_index, const char* label) {
-    if (topology.installed_profile == profile_index) { return; }
-    DecodeGraphProfile& profile = family.profiles.at(profile_index);
-    if (!family.reinstantiate_rejected_updates) {
-        topology.executable.update(profile.definition);
-        topology.installed_profile = profile_index;
-        return;
-    }
-    // tp 2: every profile of a class is captured from one body, and most swaps update in place in
-    // microseconds. The rejections observed are tp 2 only: ParametersChanged on a cross-device
-    // memcpy node, intermittent, late in long runs, root cause not identified. Such a swap
-    // re-instantiates the same definition instead of failing the round.
-    std::string diagnostic;
-    if (!topology.executable.update_or_reinstantiate(profile.definition, diagnostic) &&
-        !profile.update_rejected) {
-        profile.update_rejected = true;
-        std::fprintf(stderr,
-                     "warning: cuda graphs | %s profile %zu: exec update failed (%s) "
-                     "-- re-instantiating\n",
-                     label, profile_index, diagnostic.c_str());
-    }
-    topology.installed_profile = profile_index;
-}
-
 void ProgramImpl::prepare_graphs() {
     if (!use_cuda_graph) { return; }
     nvtx::ScopedRange prepare_range(nvtx::Name::CudaGraphPrepare, nvtx::Category::Graph);
-    for (DecodeGraphFamily* family : {&ordinary_graphs, &mtp_graphs, &dflash_graphs}) {
-        family->reinstantiate_rejected_updates = tensor_parallel();
-    }
 
     // The planned graph allowance covers the installed executables and the driver and module
     // state the eager warmups and captures materialize, so the observation spans all of it, on
