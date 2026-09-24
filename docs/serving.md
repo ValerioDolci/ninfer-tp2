@@ -786,7 +786,7 @@ The table lists executable defaults. The startup example selects a long-context 
 | `--vision-device N` | CUDA device that holds the Vision tower and encodes; one of `--devices` at `--tp 2`; see [Two GPUs](#two-gpus) | `--device` |
 | `--max-vision-tokens N` | merged Vision tokens of one image or video item (`64..16384`); larger media are resized and the encode workspace is planned for `N` | `16384` |
 | `--no-cuda-graph` | disable CUDA Graph decode | graphs on |
-| `--no-tp-mailbox` | keep the captured `--tp 2` all-reduces on cross-device copies; see [Two GPUs](#two-gpus) | mailbox on |
+| `--no-tp-mailbox` | keep the captured `--tp 2` all-reduces on cross-device copies; see [Two GPUs](#two-gpus) | mailbox on without P2P |
 | `--no-prefix-reuse` | disable compatible-prefix caching | prefix reuse on |
 | `--device-state-slots N` | extra Device checkpoint StateImages beyond the active-lane guarantee | `max-concurrency`; `max(2 * max-concurrency, 8)` at `--tp 2` |
 | `--host-state-slots N` | pinned Host StateImage capacity | `8`; `0` at `--tp 2` |
@@ -871,7 +871,9 @@ that still does not fit is skipped, and that conversation's next turn re-prefill
 checkpoint or its whole prompt. On one GPU the behaviour is unchanged: with `--host-state-slots 0`
 a capture that finds the Device pool full is skipped without releasing anything.
 Each extra slot costs one StateImage per rank (about 73 MiB for Qwen3.8-27B); agentic or
-multi-conversation servers should set `--device-state-slots 12` to `16`. The startup log prints one
+multi-conversation servers should set `--device-state-slots 12` to `16` when memory allows (on two
+16 GB boards at 196,608 tokens with Vision only 4 fit with the official NVFP4 artifact; see the
+limitations in the README). The startup log prints one
 line per rank and a `tensor parallel` capacity line with the Device checkpoint pool and the
 transfer path: `p2p on` when the driver grants direct peer access, `p2p off (host-staged copies)`
 otherwise (GeForce boards). With CUDA Graphs one `cuda graphs` line per rank compares the device

@@ -178,7 +178,9 @@ a `vision_device` outside `devices`, requires a text answer identical with and w
 names the color of synthetic red and blue images with the tower on device 0, and requires the same
 token ids with the tower on device 1, where the embeddings are copied the other way; its
 `vision_tp2_mtp_real` and `vision_tp2_dflash2_real` variants serve the images with MTP and DFlash2
-and resume a second turn of the image conversation:
+and resume a second turn of the image conversation (with the QUASAR-QAT artifact, which has no
+DFlash2 component, the two DFlash2 variants fail with `missing component dflash2` instead of being
+skipped):
 
 ```bash
 NINFER_TEST_ARTIFACT=$PWD/out/qwen3_8_27b_nvfp4.ninfer \
