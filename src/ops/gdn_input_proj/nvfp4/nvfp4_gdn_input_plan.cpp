@@ -26,21 +26,22 @@ Nvfp4GdnInputRoute resolve_route(LinearPolicy policy, std::int32_t tokens) {
 
 void launch_a16(const Tensor& x, const Weight& weight, Tensor& qkv, Tensor& z,
                 cudaStream_t stream) {
-    constexpr std::int32_t kChunk   = 32;
-    constexpr std::int32_t kQkvRows = 10240;
-    constexpr std::int32_t kZRows   = 6144;
+    constexpr std::int32_t kChunk = 32;
+    // The parent and its two-device shard differ only in their section rows.
+    const std::int32_t qkv_rows = qkv.ne[0];
+    const std::int32_t z_rows   = z.ne[0];
     for (std::int32_t token_begin = 0; token_begin < x.ne[1]; token_begin += kChunk) {
         const std::int32_t active = std::min(kChunk, x.ne[1] - token_begin);
         auto* input               = static_cast<std::uint8_t*>(x.data) +
                       static_cast<std::int64_t>(token_begin) * weight.k * sizeof(std::uint16_t);
         auto* qkv_output =
             static_cast<std::uint8_t*>(qkv.data) +
-            static_cast<std::int64_t>(token_begin) * kQkvRows * sizeof(std::uint16_t);
+            static_cast<std::int64_t>(token_begin) * qkv_rows * sizeof(std::uint16_t);
         auto* z_output = static_cast<std::uint8_t*>(z.data) +
-                         static_cast<std::int64_t>(token_begin) * kZRows * sizeof(std::uint16_t);
+                         static_cast<std::int64_t>(token_begin) * z_rows * sizeof(std::uint16_t);
         Tensor input_chunk(input, DType::BF16, {weight.k, active});
-        Tensor qkv_chunk(qkv_output, DType::BF16, {kQkvRows, active});
-        Tensor z_chunk(z_output, DType::BF16, {kZRows, active});
+        Tensor qkv_chunk(qkv_output, DType::BF16, {qkv_rows, active});
+        Tensor z_chunk(z_output, DType::BF16, {z_rows, active});
         if (active == 1) {
             nvfp4_gdn_input_decode_launch(input_chunk, weight, qkv_chunk, z_chunk, stream);
         } else {

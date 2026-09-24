@@ -115,14 +115,20 @@ void launch_nvfp4_w4a4_tma_attention(std::int32_t parent_rows,
     });
 }
 
-void launch_nvfp4_w4a4_tma_gdn(const std::uint8_t* activation_codes,
+void launch_nvfp4_w4a4_tma_gdn(std::int32_t parent_rows, const std::uint8_t* activation_codes,
                                const std::uint8_t* activation_scales,
                                const std::uint8_t* weight_codes, const std::uint8_t* weight_scales,
                                __nv_bfloat16* qkv, __nv_bfloat16* z, std::int32_t tokens,
                                float alpha, cudaStream_t stream) {
-    launch_tma<Nvfp4N16384K5120, TmaM256N128>(activation_codes, activation_scales, weight_codes,
-                                              weight_scales, tokens, alpha, Nvfp4IdentityEpilogue{},
-                                              Nvfp4GdnInputOutput{qkv, z}, stream);
+    // The two-device shard keeps the parent's schedule.
+    visit_nvfp4_gdn_input_problem(parent_rows, [&]<class Problem>() {
+        using Output = typename Problem::Output;
+        static_assert((Output::kQkvRows % TmaM256N128::kBlockN) == 0);
+        static_assert((Output::kZRows % TmaM256N128::kBlockN) == 0);
+        launch_tma<typename Problem::Geometry, TmaM256N128>(
+            activation_codes, activation_scales, weight_codes, weight_scales, tokens, alpha,
+            Nvfp4IdentityEpilogue{}, Output{qkv, z}, stream);
+    });
 }
 
 template <class Geometry>

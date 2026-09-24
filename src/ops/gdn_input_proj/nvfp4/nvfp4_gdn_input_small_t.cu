@@ -15,10 +15,11 @@ namespace {
 
 using Launch = void (*)(const Tensor&, const Weight&, Tensor&, Tensor&, cudaStream_t);
 
-template <int ActiveTokens>
+template <class Problem, int ActiveTokens>
 void launch_exact(const Tensor& x, const Weight& weight, Tensor& qkv, Tensor& z,
                   cudaStream_t stream) {
-    using Geometry = Nvfp4N16384K5120;
+    using Geometry = typename Problem::Geometry;
+    using Output   = typename Problem::Output;
     using Schedule = Nvfp4SimtSchedule<4, 1, 2, (ActiveTokens >= 17 && ActiveTokens <= 20) ? 8 : 16,
                                        ActiveTokens, 1,
                                        ActiveTokens == 2 ? Nvfp4SimtActivationAccess::SharedPhase
@@ -31,23 +32,26 @@ void launch_exact(const Tensor& x, const Weight& weight, Tensor& qkv, Tensor& z,
     nvfp4_simt_kernel<Geometry, ActiveTokens, Schedule><<<kBlocks, Schedule::kThreads, 0, stream>>>(
         static_cast<const __nv_bfloat16*>(x.data), static_cast<const std::uint8_t*>(weight.qdata),
         static_cast<const std::uint8_t*>(weight.scales), inverse, Nvfp4IdentityEpilogue{},
-        Nvfp4GdnInputOutput{static_cast<__nv_bfloat16*>(qkv.data),
-                            static_cast<__nv_bfloat16*>(z.data)});
+        Output{static_cast<__nv_bfloat16*>(qkv.data), static_cast<__nv_bfloat16*>(z.data)});
     CUDA_CHECK(cudaGetLastError());
 }
 
-template <std::size_t... Offsets>
+template <class Problem, std::size_t... Offsets>
 constexpr auto make_launchers(std::index_sequence<Offsets...>) {
-    return std::array<Launch, sizeof...(Offsets)>{&launch_exact<2 + static_cast<int>(Offsets)>...};
+    return std::array<Launch, sizeof...(Offsets)>{
+        &launch_exact<Problem, 2 + static_cast<int>(Offsets)>...};
 }
 
-constexpr auto kLaunchers = make_launchers(std::make_index_sequence<32 - 2 + 1>{});
+template <class Problem>
+constexpr auto kLaunchers = make_launchers<Problem>(std::make_index_sequence<32 - 2 + 1>{});
 
 } // namespace
 
 void nvfp4_gdn_input_small_t_launch(const Tensor& x, const Weight& weight, Tensor& qkv, Tensor& z,
                                     cudaStream_t stream) {
-    kLaunchers[x.ne[1] - 2](x, weight, qkv, z, stream);
+    visit_nvfp4_gdn_input_problem(weight.n, [&]<class Problem>() {
+        kLaunchers<Problem>[x.ne[1] - 2](x, weight, qkv, z, stream);
+    });
 }
 
 } // namespace ninfer::ops::detail

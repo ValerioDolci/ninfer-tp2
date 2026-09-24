@@ -25,7 +25,9 @@ void launch_nvfp4_w4a4_tma_attention(std::int32_t parent_rows,
                                      __nv_bfloat16* gate, __nv_bfloat16* key, __nv_bfloat16* value,
                                      std::int32_t tokens, float alpha, cudaStream_t stream);
 
-void launch_nvfp4_w4a4_tma_gdn(const std::uint8_t* activation_codes,
+// `parent_rows` selects the GDN input [16384,5120] parent or its two-device [8192,5120] shard
+// (gdn_input_proj/nvfp4/nvfp4_gdn_input_output.cuh).
+void launch_nvfp4_w4a4_tma_gdn(std::int32_t parent_rows, const std::uint8_t* activation_codes,
                                const std::uint8_t* activation_scales,
                                const std::uint8_t* weight_codes, const std::uint8_t* weight_scales,
                                __nv_bfloat16* qkv, __nv_bfloat16* z, std::int32_t tokens,
