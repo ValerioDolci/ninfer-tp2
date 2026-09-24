@@ -332,6 +332,9 @@ runs on rank 0 alone and requires `--lm-head-draft`, since the full output head 
 vocabulary across the ranks; a drafter with full-attention layers is not supported.
 `--spec dflash`, the MoE architecture and the `fp8`, `nvfp4` and `k8v4` KV types are rejected at
 startup.
+The split attention and Gated DeltaNet projections take FP8 or NVFP4 weights and the split MLP
+FP8 or NVFP4, so both the official mixed artifact (FP8 attention and GDN, NVFP4 MLP) and an
+all-NVFP4 recipe run at `--tp 2`; the MTP head splits only in Q8, as the official recipes store it.
 
 `--vision` works at `--tp 2` with each of these modes. The Vision tower and its encode workspace
 live on one GPU, `--vision-device` (default `A`), which must be one of `--devices`: it encodes each

@@ -21,12 +21,16 @@
 >   on Linux with CUDA 13.1. Other Blackwell GeForce pairs should work but are untested. A pair
 >   with peer access keeps its all-reduces on direct copies (the host mailbox is only used without
 >   P2P); that path is untested too. Exactly two GPUs: `--tp` accepts 1 or 2.
-> - **Weights.** Only the Qwen3.8-27B NVFP4 artifact (`qwen3_8_27b_nvfp4.ninfer`) is verified.
->   The MoE model is rejected at startup; the groupwise-int artifacts are untested at `--tp 2`.
+> - **Weights.** Verified with the Qwen3.8-27B NVFP4 artifact (`qwen3_8_27b_nvfp4.ninfer`: NVFP4
+>   MLP, FP8 attention and GDN projections) and with an all-NVFP4 conversion of the QUASAR-QAT
+>   checkpoint (every layer projection NVFP4). The split projections take FP8 or NVFP4; the MTP
+>   head splits only in Q8. The MoE model is rejected at startup; the groupwise-int artifacts are
+>   untested at `--tp 2`.
 > - **Memory per board.** Each board holds half the weights plus its half of the KV cache, so the
 >   context and the number of retained conversations trade against each other:
 >   - MTP3 runs at 262,144 tokens with 4 device state slots, or at 196,608 with `--vision` and
->     4 slots (the default 8 slots plus Vision do not fit at 196,608);
+>     4 slots (the default 8 slots plus Vision do not fit at 196,608); the all-NVFP4 artifact
+>     (17.0 GiB of weights instead of 20.9) runs at 262,144 with `--vision` and 8 slots;
 >   - the DFlash2 drafter lives whole on the first GPU, so DFlash2 stops at about 150,000
 >     tokens; at 131,072 it starts with 2 device state slots.
 > - **No host tier.** `--host-state-slots` and `--host-kv-mib` must be 0 at `--tp 2`: retained
