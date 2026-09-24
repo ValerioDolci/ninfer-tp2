@@ -87,8 +87,11 @@ std::vector<std::vector<unsigned char>> fill_device_pool(ninfer::DeviceKVPagePoo
         const ninfer::Tensor& plane = pool.plane(plane_index);
         std::vector<unsigned char> host(plane.bytes());
         for (std::size_t index = 0; index < host.size(); ++index) {
-            host[index] =
-                static_cast<unsigned char>((index * 29U + plane_index * 61U + 17U) & 0xffU);
+            // Not periodic in any page stride: the high index bits enter the byte, so two pages
+            // (and two planes) never hold the same bytes and a missed page copy is visible.
+            const std::size_t mixed =
+                index * 29U + (index >> 8U) * 7U + (index >> 16U) * 13U + plane_index * 61U + 17U;
+            host[index] = static_cast<unsigned char>(mixed & 0xffU);
         }
         const cudaError_t err =
             cudaMemcpyAsync(plane.data, host.data(), host.size(), cudaMemcpyHostToDevice, stream);
@@ -478,6 +481,8 @@ int exercise_mirror(ninfer::DeviceContext& context) {
     const ninfer::Tensor& mirror_plane       = mirror_pool.plane(0);
     const std::vector<std::int32_t> physical = read_mapping(tables.row(row.handle()), pages.size());
     const std::vector<unsigned char> mirror_source = read_page(mirror_plane, physical[0]);
+    failures += expect(read_page(mirror_plane, physical[1]) != mirror_source,
+                       "mirror copy_page source and destination pages already hold the same bytes");
     pool.copy_page(pages[0].handle(), pages[1].handle(), context.stream);
     const ninfer::DeviceKVPageHandle zeroed[] = {pages[2].handle()};
     pool.zero_pages(zeroed, context.stream);
