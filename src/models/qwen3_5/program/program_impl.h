@@ -345,11 +345,14 @@ struct DecodeGraphTopology {
 struct DecodeGraphFamily {
     std::vector<DecodeGraphProfile> profiles;
     std::vector<DecodeGraphTopology> topologies;
+    // tp 2 only: a profile swap whose in-place update the driver rejects with ParametersChanged is
+    // re-instantiated instead of failing the round. At tp 1 a rejected swap throws, as upstream.
+    bool reinstantiate_rejected_updates = false;
 };
 
 // Makes profile `profile_index` of `family` the one `topology` executes: an in-place
-// cudaGraphExecUpdate, or, when the update is rejected, a fresh instantiation of the profile's
-// definition (warned once per profile). Load (prepare_graphs) and every decode round that crosses
+// cudaGraphExecUpdate, or, when the family allows it (tp 2) and the driver rejects the update's
+// parameters, a fresh instantiation of the profile's definition (warned once per profile). Load (prepare_graphs) and every decode round that crosses
 // into another profile of the class go through here.
 void install_graph_definition(DecodeGraphFamily& family, DecodeGraphTopology& topology,
                               std::size_t profile_index, const char* label);
