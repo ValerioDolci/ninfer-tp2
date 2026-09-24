@@ -328,7 +328,7 @@ Tensor parallelism covers ordinary decoding, `--spec mtp` and `--spec dflash2` o
 architecture with `bf16` or `int8` KV. The MTP head is split like a Text layer and verification
 runs on both ranks; `--draft-tokens` and `--lm-head-draft` work as on one GPU. The DFlash2 drafter
 runs on rank 0 alone and requires `--lm-head-draft`, since the full output head is split by
-vocabulary across the ranks. `--spec dflash`, the MoE architecture and the `fp8`, `nvfp4` and
+vocabulary across the ranks; a drafter with full-attention layers is not supported. `--spec dflash`, the MoE architecture and the `fp8`, `nvfp4` and
 `k8v4` KV types are rejected at startup.
 
 `--vision` works at `--tp 2` with each of these modes. The Vision tower and its encode workspace
