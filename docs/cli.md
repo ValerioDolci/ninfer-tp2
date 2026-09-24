@@ -221,7 +221,7 @@ The table lists executable defaults. The examples above select FP8 KV and MTP3.
 | `--vision-device N` | CUDA device that holds the Vision tower and encodes; one of `--devices` at `--tp 2` | `--device` |
 | `--max-vision-tokens N` | merged Vision tokens of one image or video item (`64..16384`); larger media are resized | `16384` |
 | `--no-cuda-graph` | disable CUDA Graph decode | graphs on |
-| `--no-tp-mailbox` | keep the captured `--tp 2` all-reduces on cross-device copies; see [Two GPUs](#two-gpus) | mailbox on |
+| `--no-tp-mailbox` | keep the captured `--tp 2` all-reduces on cross-device copies; see [Two GPUs](#two-gpus) | mailbox on without P2P |
 | `--chat-template FILE` | use a local Jinja template | artifact template |
 | `--no-thinking` | disable thinking | template default |
 | `--thinking-budget N` | positive model-origin thinking-token cap; omitted means unlimited | unset |
@@ -322,7 +322,8 @@ the KV cache and recurrent state, and both reserve the same runtime layout; `--k
 sizes it from the rank with less free memory. Direct peer access is used when the driver grants it;
 otherwise the transfers are staged through host memory, which is slower but equivalent. In CUDA
 Graph decode, a single request's all-reduces instead exchange through a small pinned host mailbox,
-one kernel per GPU, with identical results; `--no-tp-mailbox` keeps them on the staged copies.
+one kernel per GPU, with identical results, when the GPUs have no peer access; `--no-tp-mailbox`
+keeps them on the staged copies.
 
 Tensor parallelism covers ordinary decoding, `--spec mtp` and `--spec dflash2` of the dense
 architecture with `bf16` or `int8` KV. The MTP head is split like a Text layer and verification
