@@ -2880,7 +2880,7 @@ void test_in_progress_adoption_and_private_capture() {
 
 // Without a Host State tier a full Device pool must not silently drop every new conversation's
 // turn-closure capture: the oldest idle private continuation is released to make room, and only
-// when the reclaim is enabled, which the Engine does for zero host_state_slots at any tp.
+// when the reclaim is enabled, which the Engine does at tp 2 only.
 void test_hostless_private_capture_reclaims_oldest_idle_continuation() {
     for (const bool reclaim : {false, true}) {
         FakeManager manager(1, 3, 0, true, 2, test_cost_model(), reclaim);

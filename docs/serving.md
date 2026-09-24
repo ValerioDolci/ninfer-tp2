@@ -866,7 +866,8 @@ captured during prefill (the turn-closure point a follow-up turn resumes from, a
 that finds the Device pool full first releases idle retained conversations without a live session,
 least valuable and oldest first, until it fits; each release counts as a private eviction. A capture
 that still does not fit is skipped, and that conversation's next turn re-prefills from an earlier
-checkpoint or its whole prompt. The same reclaim applies on one GPU with `--host-state-slots 0`.
+checkpoint or its whole prompt. On one GPU the behaviour is unchanged: with `--host-state-slots 0`
+a capture that finds the Device pool full is skipped without releasing anything.
 Each extra slot costs one StateImage per rank (about 73 MiB for Qwen3.8-27B); agentic or
 multi-conversation servers should set `--device-state-slots 12` to `16`. The startup log prints one
 line per rank and a `tensor parallel` capacity line with the Device checkpoint pool and the

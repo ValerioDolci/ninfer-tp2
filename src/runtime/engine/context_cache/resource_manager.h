@@ -244,8 +244,8 @@ public:
         std::optional<Choice> choice;
     };
 
-    // `reclaim_private_for_capture` is for Programs without a Host StateImage tier (Engine: zero
-    // host_state_slots); see reclaim_private_owners_for_capture().
+    // `reclaim_private_for_capture` is for Programs without a Host StateImage tier (Engine: tp 2
+    // only); see reclaim_private_owners_for_capture().
     ResourceManager(std::uint32_t lane_count, std::uint32_t private_catalog_capacity,
                     std::uint32_t shared_catalog_capacity, bool cache_enabled,
                     std::uint32_t max_long_anchors, ContextMachineCostModel cost_model,
