@@ -1,6 +1,7 @@
 #include "ops/linear/nvfp4/nvfp4_w4a4_tma_launch.h"
 
 #include "core/device.h"
+#include "ops/attn_input_proj/nvfp4/nvfp4_attn_input_output.cuh"
 #include "ops/gdn_input_proj/nvfp4/nvfp4_gdn_input_output.cuh"
 #include "ops/launcher/kernel_attr_once.h"
 #include "ops/linear/nvfp4/nvfp4_config.h"
@@ -18,43 +19,6 @@ namespace {
 using TmaM256N128 = Nvfp4W4a4TmaSchedule<256, 3, 1>;
 // K128 consumes 64 code bytes per row. Prefetch the adjacent half-line for the next K tile.
 using TmaM256N128Prefetch128B = Nvfp4W4a4TmaSchedule<256, 3, 1, CU_TENSOR_MAP_L2_PROMOTION_L2_128B>;
-
-constexpr std::int32_t kQueryRows  = 6144;
-constexpr std::int32_t kKeyRows    = 1024;
-constexpr std::int32_t kGateRows   = 6144;
-constexpr std::int32_t kKeyBegin   = kQueryRows;
-constexpr std::int32_t kGateBegin  = kKeyBegin + kKeyRows;
-constexpr std::int32_t kValueBegin = kGateBegin + kGateRows;
-
-struct AttentionOutput {
-    __nv_bfloat16* query;
-    __nv_bfloat16* key;
-    __nv_bfloat16* gate;
-    __nv_bfloat16* value;
-
-    __device__ __forceinline__ __nv_bfloat16* destination(std::int32_t parent_row,
-                                                          std::int32_t token) const {
-        if (parent_row < kKeyBegin) {
-            return query + static_cast<std::int64_t>(token) * kQueryRows + parent_row;
-        }
-        if (parent_row < kGateBegin) {
-            return key + static_cast<std::int64_t>(token) * kKeyRows + parent_row - kKeyBegin;
-        }
-        if (parent_row < kValueBegin) {
-            return gate + static_cast<std::int64_t>(token) * kGateRows + parent_row - kGateBegin;
-        }
-        return value + static_cast<std::int64_t>(token) * kKeyRows + parent_row - kValueBegin;
-    }
-
-    __device__ __forceinline__ void store_vector(std::int32_t parent_row, std::int32_t token,
-                                                 uint4 values) const {
-        store_vec(destination(parent_row, token), values);
-    }
-};
-
-static_assert((kQueryRows % TmaM256N128::kBlockN) == 0);
-static_assert((kKeyRows % TmaM256N128::kBlockN) == 0);
-static_assert((kGateRows % TmaM256N128::kBlockN) == 0);
 
 template <class Geometry, class Schedule, class Epilogue, class Output>
 void launch_tma(const std::uint8_t* activation_codes, const std::uint8_t* activation_scales,
@@ -133,15 +97,22 @@ void launch_nvfp4_w4a4_tma_linear(Nvfp4GeometryId problem, const std::uint8_t* a
     }
 }
 
-void launch_nvfp4_w4a4_tma_attention(const std::uint8_t* activation_codes,
+void launch_nvfp4_w4a4_tma_attention(std::int32_t parent_rows,
+                                     const std::uint8_t* activation_codes,
                                      const std::uint8_t* activation_scales,
                                      const std::uint8_t* weight_codes,
                                      const std::uint8_t* weight_scales, __nv_bfloat16* query,
                                      __nv_bfloat16* gate, __nv_bfloat16* key, __nv_bfloat16* value,
                                      std::int32_t tokens, float alpha, cudaStream_t stream) {
-    launch_tma<Nvfp4N14336K5120, TmaM256N128>(activation_codes, activation_scales, weight_codes,
-                                              weight_scales, tokens, alpha, Nvfp4IdentityEpilogue{},
-                                              AttentionOutput{query, key, gate, value}, stream);
+    // The two-device shard keeps the parent's schedule.
+    visit_nvfp4_attn_input_problem(parent_rows, [&]<class Problem>() {
+        using Output = typename Problem::Output;
+        static_assert((Output::kQueryRows % TmaM256N128::kBlockN) == 0);
+        static_assert((Output::kKeyRows % TmaM256N128::kBlockN) == 0);
+        launch_tma<typename Problem::Geometry, TmaM256N128>(
+            activation_codes, activation_scales, weight_codes, weight_scales, tokens, alpha,
+            Nvfp4IdentityEpilogue{}, Output{query, key, gate, value}, stream);
+    });
 }
 
 void launch_nvfp4_w4a4_tma_gdn(const std::uint8_t* activation_codes,
