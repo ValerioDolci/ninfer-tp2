@@ -1,4 +1,5 @@
 #include "ops/linear/fp8/fp8_shapes.h"
+#include "ops/linear/fp8/fp8_geometry.h"
 #include "ops/linear/fp8/fp8_launch.cuh"
 
 namespace ninfer::ops::detail {
@@ -48,7 +49,9 @@ Fp8Launch select_a16(std::int32_t tokens) {
     throw std::logic_error("fp8 A16 chunk exceeds shape capacity");
 }
 
-bool uses_a8(std::int32_t, std::int32_t max_tokens) { return max_tokens >= 25; }
+bool uses_a8(std::int32_t, std::int32_t max_tokens) {
+    return max_tokens >= kFp8DownFamilyFirstA8Tokens;
+}
 } // namespace
 
 const Fp8LinearShape kFp8N5120K8704{5120, 8704, launch_fp8_a16_chunks<24, select_a16>,
