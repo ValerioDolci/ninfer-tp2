@@ -218,7 +218,7 @@ The table lists executable defaults. The examples above select FP8 KV and MTP3.
 | `--draft-tokens N` | MTP `1..5`; DFlash/DFlash2 `1..15` | unset |
 | `--lm-head-draft` | optimized proposal head | off |
 | `--vision` | enable image/video input and load Vision GPU allocations | off |
-| `--vision-device N` | CUDA device that holds the Vision tower and encodes; one of `--devices` at `--tp 2` | `--device` |
+| `--vision-device N` | CUDA device that holds the Vision tower and encodes; equal to `--device` on one GPU, one of `--devices` at `--tp 2` | `--device` |
 | `--max-vision-tokens N` | merged Vision tokens of one image or video item (`64..16384`); larger media are resized | `16384` |
 | `--no-cuda-graph` | disable CUDA Graph decode | graphs on |
 | `--no-tp-mailbox` | keep the captured `--tp 2` all-reduces on cross-device copies; see [Two GPUs](#two-gpus) | mailbox on without P2P |
@@ -312,7 +312,7 @@ models whose weights do not fit one device (Qwen3.8-27B NVFP4 on two 16 GB board
 
 ```bash
 ./build/apps/ninfer models/qwen3_8_27b_nvfp4.ninfer --tp 2 --devices 0,1 \
-  --max-context 8192 --prompt "Quanto fa 17*23?"
+  --max-context 8192 --prompt "What is 17*23?"
 ```
 
 Rank 0 runs on `A` and owns scheduling and sampling; `--device`, when given, must equal `A`.
@@ -329,8 +329,9 @@ Tensor parallelism covers ordinary decoding, `--spec mtp` and `--spec dflash2` o
 architecture with `bf16` or `int8` KV. The MTP head is split like a Text layer and verification
 runs on both ranks; `--draft-tokens` and `--lm-head-draft` work as on one GPU. The DFlash2 drafter
 runs on rank 0 alone and requires `--lm-head-draft`, since the full output head is split by
-vocabulary across the ranks; a drafter with full-attention layers is not supported. `--spec dflash`, the MoE architecture and the `fp8`, `nvfp4` and
-`k8v4` KV types are rejected at startup.
+vocabulary across the ranks; a drafter with full-attention layers is not supported.
+`--spec dflash`, the MoE architecture and the `fp8`, `nvfp4` and `k8v4` KV types are rejected at
+startup.
 
 `--vision` works at `--tp 2` with each of these modes. The Vision tower and its encode workspace
 live on one GPU, `--vision-device` (default `A`), which must be one of `--devices`: it encodes each

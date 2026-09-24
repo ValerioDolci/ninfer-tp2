@@ -161,7 +161,7 @@ std::vector<ImageProbe> image_probes() {
     return probes;
 }
 
-constexpr const char* kTextPrompt = "Quanto fa 17*23? Rispondi col solo numero.";
+constexpr const char* kTextPrompt = "What is 17*23? Answer with the number only.";
 
 // The image probes, each checked for its color and an encoder run.
 int run_images(ninfer::Engine& engine, std::vector<ninfer::GenerationResult>& results,

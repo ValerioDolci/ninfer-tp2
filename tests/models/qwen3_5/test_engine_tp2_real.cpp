@@ -3,7 +3,7 @@
 // than a comparison with tp 1. CUDA Graphs, the context cache and two request lanes are on, as in
 // the served default.
 //
-//   * single: "Quanto fa 17*23?" is prefilled and decoded greedily; the answer contains "391".
+//   * single: "What is 17*23?" is prefilled and decoded greedily; the answer contains "391".
 //   * concurrent: a long answer keeps lane 0 decoding while a second prompt is admitted on lane 1,
 //     prefilled and decoded in shared rounds. Rank 1 must prefill each lane through that lane's
 //     own KV execution row, so both answers must still be right (a stale rank 1 row writes lane
@@ -121,7 +121,7 @@ int exercise_load(const ninfer::Engine& engine) {
 
 int exercise_single(ninfer::Engine& engine) {
     const ninfer::GenerationResult result = engine.generate(
-        engine.prepare(user_prompt("Quanto fa 17*23? Rispondi col solo numero.")), greedy(32));
+        engine.prepare(user_prompt("What is 17*23? Answer with the number only.")), greedy(32));
     return check_answer(result, "391", "single request");
 }
 
@@ -131,11 +131,11 @@ int exercise_concurrent(ninfer::Engine& engine) {
     // Submitted before either is waited on: the long answer holds lane 0 while the second prompt
     // is admitted on lane 1 and joins its decode rounds.
     ninfer::GenerationHandle counting = engine.submit(
-        engine.prepare(user_prompt("Scrivi i numeri interi da 1 a 40, separati da una virgola e "
-                                   "uno spazio, senza nient'altro.")),
+        engine.prepare(user_prompt("Write the integers from 1 to 40, separated by a comma and a "
+                                   "space, and nothing else.")),
         greedy(160));
     ninfer::GenerationHandle product = engine.submit(
-        engine.prepare(user_prompt("Quanto fa 17*23? Rispondi col solo numero.")), greedy(32));
+        engine.prepare(user_prompt("What is 17*23? Answer with the number only.")), greedy(32));
     const ninfer::GenerationResult counted    = counting.wait();
     const ninfer::GenerationResult multiplied = product.wait();
     const ninfer::RuntimeStats after          = engine.runtime_stats();
@@ -150,9 +150,9 @@ int exercise_concurrent(ninfer::Engine& engine) {
     }
 
     ninfer::GenerationHandle first = engine.submit(
-        engine.prepare(user_prompt("Quanto fa 17*23? Rispondi col solo numero.")), greedy(32));
+        engine.prepare(user_prompt("What is 17*23? Answer with the number only.")), greedy(32));
     ninfer::GenerationHandle second = engine.submit(
-        engine.prepare(user_prompt("Quanto fa 12*12? Rispondi col solo numero.")), greedy(32));
+        engine.prepare(user_prompt("What is 12*12? Answer with the number only.")), greedy(32));
     failures += check_answer(first.wait(), "391", "concurrent pair, first");
     failures += check_answer(second.wait(), "144", "concurrent pair, second");
     return failures;
@@ -161,7 +161,7 @@ int exercise_concurrent(ninfer::Engine& engine) {
 int exercise_prefix_reuse(ninfer::Engine& engine) {
     const auto conversation = [] {
         ninfer::PromptInput input = user_prompt(
-            "Tieni a mente il codice 4817 e il colore verde. Per ora rispondi soltanto: OK.");
+            "Remember the code 4817 and the color green. For now, reply only: OK.");
         input.context_cache.session_key = "tp2-real";
         input.context_cache.retention   = ninfer::CacheRetentionHint::LiveSession;
         return input;
@@ -183,7 +183,7 @@ int exercise_prefix_reuse(ninfer::Engine& engine) {
     question.role = ninfer::ChatRole::User;
     question.parts.push_back(
         ninfer::MessagePart{.kind  = ninfer::MessagePartKind::Text,
-                            .text  = "Quanto fa 17*23? Rispondi col solo numero.",
+                            .text  = "What is 17*23? Answer with the number only.",
                             .media = {}});
     followup.messages.push_back(std::move(question));
     const ninfer::GenerationResult second =
@@ -214,11 +214,11 @@ void mark_like_chat_completions(ninfer::PromptInput& input) {
 }
 
 std::string long_document(std::string_view city = "Verona", int lines = 240) {
-    std::string text = "Leggi il registro del magazzino e poi rispondi alla domanda.\n\n";
+    std::string text = "Read the warehouse log, then answer the question.\n\n";
     for (int line = 1; line <= lines; ++line) {
-        text += "Riga " + std::to_string(line) + ": il magazzino di " + std::string(city) +
-                " ha ricevuto " + std::to_string(line * 7) + " casse di mele e " +
-                std::to_string(line * 3) + " casse di pere, spedite il giorno " +
+        text += "Line " + std::to_string(line) + ": the " + std::string(city) +
+                " warehouse received " + std::to_string(line * 7) + " crates of apples and " +
+                std::to_string(line * 3) + " crates of pears, shipped on day " +
                 std::to_string(1 + line % 28) + ".\n";
     }
     return text;
@@ -248,7 +248,7 @@ int exercise_long_prefix_reuse(ninfer::Engine& engine, const char* label,
     const std::string document = long_document(city, lines);
     const auto first_turn      = [&] {
         ninfer::PromptInput input =
-            user_prompt(document + "\nDomanda: quanto fa 17*23? Rispondi col solo numero.");
+            user_prompt(document + "\nQuestion: what is 17*23? Answer with the number only.");
         mark_like_chat_completions(input);
         return input;
     };
@@ -268,7 +268,7 @@ int exercise_long_prefix_reuse(ninfer::Engine& engine, const char* label,
     question.role = ninfer::ChatRole::User;
     question.parts.push_back(
         ninfer::MessagePart{.kind  = ninfer::MessagePartKind::Text,
-                            .text  = "Quanto fa 12*12? Rispondi col solo numero.",
+                            .text  = "What is 12*12? Answer with the number only.",
                             .media = {}});
     followup.messages.push_back(std::move(question));
     mark_like_chat_completions(followup);
@@ -302,7 +302,7 @@ int exercise_reuse_after_one_shots(ninfer::Engine& engine, const char* label) {
         for (int lane = 0; lane < 4; ++lane) {
             const int left = 11 + round * 4 + lane;
             ninfer::PromptInput input =
-                user_prompt("Quanto fa " + std::to_string(left) + "*3? Rispondi col solo numero.");
+                user_prompt("What is " + std::to_string(left) + "*3? Answer with the number only.");
             mark_like_chat_completions(input);
             handles.push_back(engine.submit(engine.prepare(std::move(input)), greedy(16, true)));
         }
