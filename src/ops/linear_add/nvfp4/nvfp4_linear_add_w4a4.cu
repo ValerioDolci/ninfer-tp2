@@ -20,8 +20,8 @@ using M128N128Resident  = Nvfp4W4a4MmaSchedule<128, 128, 256, 4, 2, 1, 2>;
 
 // This projection selects its own route, so the layout the quantizer writes below must be derived
 // from the same predicate; the two are read together at the call site for that reason. The
-// two-device half [5120,8704] takes the TMA route at the same width as linear() over the same
-// shard, so the two ranks of a row-parallel projection run the same schedule.
+// two-device halves [5120,8704] and [5120,3072] take the TMA route at the same width as linear()
+// over the same shard, so the two ranks of a row-parallel projection run the same schedule.
 constexpr bool w4a4_tma_route(std::int32_t tokens) { return tokens >= 1024; }
 
 template <class Geometry, class Schedule>
@@ -85,6 +85,9 @@ void nvfp4_linear_add_w4a4_launch(const Tensor& x, const Weight& weight, Tensor&
         return;
     case Nvfp4GeometryId::N5120K8704:
         launch_problem<Nvfp4N5120K8704>(weight, residual, workspace, tokens, stream);
+        return;
+    case Nvfp4GeometryId::N5120K3072:
+        launch_problem<Nvfp4N5120K3072>(weight, residual, workspace, tokens, stream);
         return;
     case Nvfp4GeometryId::N14336K5120:
     case Nvfp4GeometryId::N16384K5120:

@@ -92,6 +92,7 @@ void nvfp4_linear_swiglu_decode_launch(const Tensor& x, const Weight& weight, Te
     case Nvfp4GeometryId::N5120K6144:
     case Nvfp4GeometryId::N5120K17408:
     case Nvfp4GeometryId::N5120K8704:
+    case Nvfp4GeometryId::N5120K3072:
         break;
     }
     throw std::invalid_argument("nvfp4 linear_swiglu: unsupported problem");

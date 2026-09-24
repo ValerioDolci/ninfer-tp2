@@ -33,7 +33,16 @@ using Nvfp4N5120K6144  = Nvfp4Geometry<5120, 6144>;
 using Nvfp4N5120K17408 = Nvfp4Geometry<5120, 17408>;
 using Nvfp4N17408K5120 = Nvfp4Geometry<17408, 5120>;
 using Nvfp4N5120K8704  = Nvfp4Geometry<5120, 8704>;
+using Nvfp4N5120K3072  = Nvfp4Geometry<5120, 3072>;
 
+// First token count at which nvfp4 linear_add over the attention output ([5120,6144] and its
+// two-device half [5120,3072]) and over the MLP down projection ([5120,17408] and [5120,8704])
+// takes the W4A4 route. linear() over each half uses the same crossover, so rank 0's linear_add
+// and rank 1's linear() in one row-parallel pair always take the same route.
+inline constexpr std::int32_t kNvfp4OutputFamilyFirstA4Tokens = 7;
+inline constexpr std::int32_t kNvfp4DownFamilyFirstA4Tokens   = 8;
+
+using Nvfp4Activation3072Geometry  = Nvfp4ActivationGeometry<3072>;
 using Nvfp4Activation5120Geometry  = Nvfp4ActivationGeometry<5120>;
 using Nvfp4Activation6144Geometry  = Nvfp4ActivationGeometry<6144>;
 using Nvfp4Activation8704Geometry  = Nvfp4ActivationGeometry<8704>;
@@ -46,9 +55,10 @@ enum class Nvfp4GeometryId : std::uint8_t {
     N5120K6144,
     N5120K17408,
     // Two-device shards: the output-row half of the MLP gate/up projection and the input-column
-    // half of the MLP down projection.
+    // halves of the MLP down projection and of the attention and GDN output projections.
     N17408K5120,
     N5120K8704,
+    N5120K3072,
 };
 
 inline Nvfp4GeometryId resolve_nvfp4_geometry(std::int32_t output_rows, std::int32_t input_rows) {
@@ -77,6 +87,9 @@ inline Nvfp4GeometryId resolve_nvfp4_geometry(std::int32_t output_rows, std::int
     }
     if (output_rows == Nvfp4N5120K8704::kOutputRows && input_rows == Nvfp4N5120K8704::kInputRows) {
         return Nvfp4GeometryId::N5120K8704;
+    }
+    if (output_rows == Nvfp4N5120K3072::kOutputRows && input_rows == Nvfp4N5120K3072::kInputRows) {
+        return Nvfp4GeometryId::N5120K3072;
     }
     throw std::invalid_argument("unsupported NVFP4 problem");
 }

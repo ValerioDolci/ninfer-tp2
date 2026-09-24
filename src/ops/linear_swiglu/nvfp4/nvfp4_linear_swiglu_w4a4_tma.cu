@@ -99,6 +99,7 @@ void launch_nvfp4_linear_swiglu_w4a4_tma(Nvfp4GeometryId problem,
     case Nvfp4GeometryId::N5120K6144:
     case Nvfp4GeometryId::N5120K17408:
     case Nvfp4GeometryId::N5120K8704:
+    case Nvfp4GeometryId::N5120K3072:
         break;
     }
     throw std::invalid_argument("nvfp4 LinearSwiGLU TMA: unsupported problem");

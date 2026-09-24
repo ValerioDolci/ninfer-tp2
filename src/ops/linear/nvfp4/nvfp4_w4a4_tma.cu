@@ -126,6 +126,10 @@ void launch_nvfp4_w4a4_tma_linear(Nvfp4GeometryId problem, const std::uint8_t* a
         launch_linear<Nvfp4N5120K8704>(activation_codes, activation_scales, weight_codes,
                                        weight_scales, output, tokens, alpha, stream);
         return;
+    case Nvfp4GeometryId::N5120K3072:
+        launch_linear<Nvfp4N5120K3072>(activation_codes, activation_scales, weight_codes,
+                                       weight_scales, output, tokens, alpha, stream);
+        return;
     }
 }
 
@@ -175,10 +179,15 @@ void launch_nvfp4_w4a4_tma_linear_add(Nvfp4GeometryId problem, const std::uint8_
         launch_linear_add<Nvfp4N5120K17408>(activation_codes, activation_scales, weight_codes,
                                             weight_scales, residual, tokens, alpha, stream);
         return;
-    // The two-device input-column half of [5120,17408], with its parent's schedule: rank 0's
-    // linear_add then runs the same kernel as rank 1's linear() over the other half.
+    // The two-device input-column halves of [5120,17408] and [5120,6144], with their parents'
+    // schedule: rank 0's linear_add then runs the same kernel as rank 1's linear() over the other
+    // half.
     case Nvfp4GeometryId::N5120K8704:
         launch_linear_add<Nvfp4N5120K8704>(activation_codes, activation_scales, weight_codes,
+                                           weight_scales, residual, tokens, alpha, stream);
+        return;
+    case Nvfp4GeometryId::N5120K3072:
+        launch_linear_add<Nvfp4N5120K3072>(activation_codes, activation_scales, weight_codes,
                                            weight_scales, residual, tokens, alpha, stream);
         return;
     case Nvfp4GeometryId::N14336K5120:

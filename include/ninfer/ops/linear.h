@@ -82,11 +82,12 @@ enum class LinearPolicy : std::uint8_t {
  * registers `[5120,25600]` at every positive T. BF16 registers `[14336,5120]`,
  * `[5120,6144]`, and `[256,5120]` at every positive T. For two-device execution, FP8 also
  * registers the halves `[7168,5120]`, `[8192,5120]`, `[17408,5120]`, `[124160,5120]`,
- * `[5120,3072]` and `[5120,8704]`, NVFP4 registers `[17408,5120]` and `[5120,8704]`, and BF16
- * registers `[7168,5120]` and `[5120,3072]`, and Q8 registers `[5120,5120]`, `[7168,5120]`,
- * `[17408,5120]`, `[5120,3072]` and `[5120,8704]` (the MTP halves), each at every positive T and
- * resolving to the routes of the problem it halves, except that FP8 `[5120,3072]` takes A8 from
- * T=22, as linear_add() over the same half does. Text and MTP packed-weight problems accept
+ * `[5120,3072]` and `[5120,8704]`, NVFP4 registers `[17408,5120]`, `[5120,3072]` and
+ * `[5120,8704]`, and BF16 registers `[7168,5120]` and `[5120,3072]`, and Q8 registers
+ * `[5120,5120]`, `[7168,5120]`, `[17408,5120]`, `[5120,3072]` and `[5120,8704]` (the MTP halves),
+ * each at every positive T and resolving to the routes of the problem it halves, except that FP8
+ * `[5120,3072]` takes A8 from T=22 and NVFP4 `[5120,3072]` takes A4 from T=7, as linear_add() over
+ * the same half does. Text and MTP packed-weight problems accept
  * every positive column extent T. Registered Vision problems accept raw-patch P in
  * `{4,8,...,131072}` or merged-token V in `[1,32768]`; a matrix column does not inherently
  * represent a text token. FP32 is unsupported.
