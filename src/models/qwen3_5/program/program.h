@@ -839,6 +839,13 @@ struct ReleaseResult {
     runtime::ConsumeStatus status = runtime::ConsumeStatus::InvariantMismatch;
 };
 
+// The transport the captured tp 2 all-reduces use after startup; see LoadSummary::tp_transport.
+struct TpTransportStatus {
+    std::string transport; // "mailbox", "copies", or empty at tp 1
+    double probe_ms = 0.0; // startup probe round trip; 0 when no probe ran
+    std::string fallback;  // why the mailbox was dropped after its probe; empty otherwise
+};
+
 class Program {
 public:
     ~Program() noexcept;
@@ -942,6 +949,7 @@ public:
     [[nodiscard]] PhysicalUsageSnapshot physical_usage() const noexcept;
     [[nodiscard]] MemorySummary memory_summary() const noexcept;
     void reset_memory_peaks() noexcept;
+    [[nodiscard]] const TpTransportStatus& tp_transport() const noexcept;
 
 private:
     explicit Program(std::unique_ptr<detail::ProgramImpl> impl) noexcept;
