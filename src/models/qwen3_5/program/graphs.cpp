@@ -10,9 +10,11 @@
 #include <cstdio>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace ninfer::models::qwen3_5::detail {
@@ -343,162 +345,191 @@ void ProgramImpl::prepare_graphs() {
                                         graph_peer_bridge()};
     };
 
-    if (speculative_backend == SpeculativeBackend::None) {
-        const auto ordinary_profiles = ordinary_graph_profiles(capacity);
-        validate_graph_profiles(ordinary_profiles, capacity - 1, "ordinary");
-        const std::uint32_t ordinary_batch_limit = max_concurrency;
-        execution::OrdinaryBatchContext ordinary_state{execution_core(),
-                                                       decoder->text_kv,
-                                                       *io.ordinary,
-                                                       *ordinary_host_ingress,
-                                                       *ordinary_host_egress,
-                                                       state_images->continuation_hidden_store(),
-                                                       peer ? &*peer->io.ordinary : nullptr};
-        const GraphExecutionProfile code_warm = ordinary_profiles.front();
-        // A module first touched inside a capture region cannot be loaded there, and batch shape
-        // selects kernels. One eager batch-1 round warms the single-device code; at tp 2 every
-        // batch size is warmed eagerly on both devices before any capture.
-        const std::uint32_t warm_batches = tensor_parallel() ? ordinary_batch_limit : 1U;
-        for (std::uint32_t batch_size = 1; batch_size <= warm_batches; ++batch_size) {
-            prepare_representative(code_warm.min, batch_size);
-            synchronize_all();
-            execution::ordinary_decode_batch(ordinary_state, static_cast<std::int32_t>(batch_size),
-                                             {code_warm.min + 1, code_warm.max + 1}, nullptr);
-            synchronize_all();
+    // Under WSL2 a captured exchange can hang in a graph's first launch although the startup
+    // probe passed (issue #1: every MTP round, not the ordinary ones). degrade_peer_mailbox() then
+    // steps the transport down and everything is captured again, instead of failing startup.
+    // NINFER_TP_MAILBOX_FAULT=draft reports such a hang while the MTP draft phase is on the
+    // mailbox, =any while any mailbox is attached: test aids for hardware where none happens.
+    const char* fault_env        = std::getenv("NINFER_TP_MAILBOX_FAULT");
+    const std::string_view fault = fault_env != nullptr ? fault_env : "";
+    const auto synchronize_graphs = [&] {
+        if (peer_mailbox &&
+            (fault == "any" || (fault == "draft" && speculative_backend == SpeculativeBackend::Mtp &&
+                                !tp_execution->staged_draft_collectives))) {
+            peer_mailbox->report_hang();
         }
+        synchronize_devices();
+    };
+    const auto capture_and_instantiate = [&] {
+        if (speculative_backend == SpeculativeBackend::None) {
+            const auto ordinary_profiles = ordinary_graph_profiles(capacity);
+            validate_graph_profiles(ordinary_profiles, capacity - 1, "ordinary");
+            const std::uint32_t ordinary_batch_limit = max_concurrency;
+            execution::OrdinaryBatchContext ordinary_state{execution_core(),
+                                                           decoder->text_kv,
+                                                           *io.ordinary,
+                                                           *ordinary_host_ingress,
+                                                           *ordinary_host_egress,
+                                                           state_images->continuation_hidden_store(),
+                                                           peer ? &*peer->io.ordinary : nullptr};
+            const GraphExecutionProfile code_warm = ordinary_profiles.front();
+            // A module first touched inside a capture region cannot be loaded there, and batch shape
+            // selects kernels. One eager batch-1 round warms the single-device code; at tp 2 every
+            // batch size is warmed eagerly on both devices before any capture.
+            const std::uint32_t warm_batches = tensor_parallel() ? ordinary_batch_limit : 1U;
+            for (std::uint32_t batch_size = 1; batch_size <= warm_batches; ++batch_size) {
+                prepare_representative(code_warm.min, batch_size);
+                synchronize_all();
+                execution::ordinary_decode_batch(ordinary_state, static_cast<std::int32_t>(batch_size),
+                                                 {code_warm.min + 1, code_warm.max + 1}, nullptr);
+                synchronize_all();
+            }
 
-        ordinary_graphs.profiles.reserve(ordinary_profiles.size() * ordinary_batch_limit);
-        for (std::uint32_t batch_size = 1; batch_size <= ordinary_batch_limit; ++batch_size) {
-            for (const GraphExecutionProfile planned : ordinary_profiles) {
-                ordinary_graphs.profiles.emplace_back();
-                DecodeGraphProfile& profile    = ordinary_graphs.profiles.back();
-                profile.batch_size             = batch_size;
-                profile.min_execution_frontier = planned.min;
-                profile.max_execution_frontier = planned.max;
-                profile.topology_class =
-                    planned.topology_class * ordinary_batch_limit + (batch_size - 1U);
-                const ops::CausalAttentionExecutionEnvelope envelope{planned.min + 1,
-                                                                     planned.max + 1};
-                execution::capture_ordinary_decode_batch(ordinary_state,
-                                                         static_cast<std::int32_t>(batch_size),
-                                                         envelope, profile.definition);
+            ordinary_graphs.profiles.reserve(ordinary_profiles.size() * ordinary_batch_limit);
+            for (std::uint32_t batch_size = 1; batch_size <= ordinary_batch_limit; ++batch_size) {
+                for (const GraphExecutionProfile planned : ordinary_profiles) {
+                    ordinary_graphs.profiles.emplace_back();
+                    DecodeGraphProfile& profile    = ordinary_graphs.profiles.back();
+                    profile.batch_size             = batch_size;
+                    profile.min_execution_frontier = planned.min;
+                    profile.max_execution_frontier = planned.max;
+                    profile.topology_class =
+                        planned.topology_class * ordinary_batch_limit + (batch_size - 1U);
+                    const ops::CausalAttentionExecutionEnvelope envelope{planned.min + 1,
+                                                                         planned.max + 1};
+                    execution::capture_ordinary_decode_batch(ordinary_state,
+                                                             static_cast<std::int32_t>(batch_size),
+                                                             envelope, profile.definition);
+                }
             }
         }
-    }
 
-    if (speculative_backend == SpeculativeBackend::Mtp) {
-        const auto planned_profiles = mtp_graph_profiles(capacity, draft_window);
-        validate_graph_profiles(planned_profiles, capacity - 1, "MTP");
-        execution::MtpBatchContext mtp_state{execution_core(),
-                                             decoder->text_kv,
-                                             *decoder->mtp_cache(),
-                                             *io.mtp_decode,
-                                             *mtp_host_ingress,
-                                             *mtp_host_egress,
-                                             state_images->continuation_hidden_store(),
-                                             peer ? &*peer->io.mtp_decode : nullptr,
-                                             peer ? &peer->state_images->continuation_hidden_store()
-                                                  : nullptr};
-        const GraphExecutionProfile code_warm = planned_profiles.front();
-        // As for ordinary rounds: every batch size is warmed eagerly on both devices at tp 2
-        // before any capture, since batch shape selects kernels.
-        const std::uint32_t warm_batches = tensor_parallel() ? max_concurrency : 1U;
-        for (std::uint32_t batch_size = 1; batch_size <= warm_batches; ++batch_size) {
-            prepare_representative(code_warm.min, batch_size);
-            synchronize_all();
-            execution::mtp_decode_batch(
-                mtp_state, static_cast<std::int32_t>(batch_size), draft_window,
-                mtp_causal_attention_envelopes(code_warm.max, draft_window, capacity), nullptr);
-            synchronize_all();
-        }
-
-        mtp_graphs.profiles.reserve(planned_profiles.size() * max_concurrency);
-        for (std::uint32_t batch_size = 1; batch_size <= max_concurrency; ++batch_size) {
-            for (const GraphExecutionProfile planned : planned_profiles) {
-                mtp_graphs.profiles.emplace_back();
-                DecodeGraphProfile& profile    = mtp_graphs.profiles.back();
-                profile.batch_size             = batch_size;
-                profile.min_execution_frontier = planned.min;
-                profile.max_execution_frontier = planned.max;
-                profile.topology_class =
-                    planned.topology_class * max_concurrency + (batch_size - 1U);
-                execution::capture_mtp_decode_batch(
+        if (speculative_backend == SpeculativeBackend::Mtp) {
+            const auto planned_profiles = mtp_graph_profiles(capacity, draft_window);
+            validate_graph_profiles(planned_profiles, capacity - 1, "MTP");
+            execution::MtpBatchContext mtp_state{execution_core(),
+                                                 decoder->text_kv,
+                                                 *decoder->mtp_cache(),
+                                                 *io.mtp_decode,
+                                                 *mtp_host_ingress,
+                                                 *mtp_host_egress,
+                                                 state_images->continuation_hidden_store(),
+                                                 peer ? &*peer->io.mtp_decode : nullptr,
+                                                 peer ? &peer->state_images->continuation_hidden_store()
+                                                      : nullptr};
+            const GraphExecutionProfile code_warm = planned_profiles.front();
+            // As for ordinary rounds: every batch size is warmed eagerly on both devices at tp 2
+            // before any capture, since batch shape selects kernels.
+            const std::uint32_t warm_batches = tensor_parallel() ? max_concurrency : 1U;
+            for (std::uint32_t batch_size = 1; batch_size <= warm_batches; ++batch_size) {
+                prepare_representative(code_warm.min, batch_size);
+                synchronize_all();
+                execution::mtp_decode_batch(
                     mtp_state, static_cast<std::int32_t>(batch_size), draft_window,
-                    mtp_causal_attention_envelopes(planned.max, draft_window, capacity),
-                    profile.definition);
+                    mtp_causal_attention_envelopes(code_warm.max, draft_window, capacity), nullptr);
+                synchronize_all();
+            }
+
+            mtp_graphs.profiles.reserve(planned_profiles.size() * max_concurrency);
+            for (std::uint32_t batch_size = 1; batch_size <= max_concurrency; ++batch_size) {
+                for (const GraphExecutionProfile planned : planned_profiles) {
+                    mtp_graphs.profiles.emplace_back();
+                    DecodeGraphProfile& profile    = mtp_graphs.profiles.back();
+                    profile.batch_size             = batch_size;
+                    profile.min_execution_frontier = planned.min;
+                    profile.max_execution_frontier = planned.max;
+                    profile.topology_class =
+                        planned.topology_class * max_concurrency + (batch_size - 1U);
+                    execution::capture_mtp_decode_batch(
+                        mtp_state, static_cast<std::int32_t>(batch_size), draft_window,
+                        mtp_causal_attention_envelopes(planned.max, draft_window, capacity),
+                        profile.definition);
+                }
             }
         }
-    }
-    if (is_masked_draft_backend(speculative_backend)) {
-        const auto batch_one_profiles =
-            dflash_graph_profiles(speculative_backend, capacity, draft_window, 1);
-        validate_graph_profiles(batch_one_profiles, capacity - 1, "DFlash");
-        execution::DFlashBatchContext dflash_state{
-            execution_core(),
-            decoder->text_kv,
-            *dflash,
-            *io.dflash_decode,
-            *dflash_host_ingress,
-            *dflash_host_egress,
-            state_images->continuation_hidden_store(),
-            peer ? &*peer->io.dflash_decode : nullptr,
-            peer ? &peer->state_images->continuation_hidden_store() : nullptr};
-        const GraphExecutionProfile code_warm = batch_one_profiles.front();
-        const ops::CausalAttentionExecutionEnvelope code_warm_target{
-            1, static_cast<std::uint32_t>(std::min<std::uint64_t>(
-                   capacity, static_cast<std::uint64_t>(code_warm.max) + draft_window + 1ULL))};
-        // As for ordinary and MTP rounds: every batch size is warmed eagerly on both devices at
-        // tp 2 before any capture, since batch shape selects kernels.
-        const std::uint32_t warm_batches = tensor_parallel() ? max_concurrency : 1U;
-        for (std::uint32_t batch_size = 1; batch_size <= warm_batches; ++batch_size) {
-            prepare_representative(code_warm.min, batch_size);
-            synchronize_all();
-            execution::dflash_decode_batch(
-                dflash_state, static_cast<std::int32_t>(batch_size), draft_window,
-                dflash_envelopes(code_warm.min, code_warm.max, draft_window), code_warm_target,
-                nullptr);
-            synchronize_all();
-        }
-
-        dflash_graphs.profiles.reserve(batch_one_profiles.size() * max_concurrency);
-        for (std::uint32_t batch_size = 1; batch_size <= max_concurrency; ++batch_size) {
-            const auto planned_profiles = batch_size == 1
-                                              ? batch_one_profiles
-                                              : dflash_graph_profiles(speculative_backend, capacity,
-                                                                      draft_window, batch_size);
-            validate_graph_profiles(planned_profiles, capacity - 1, "DFlash");
-            for (const GraphExecutionProfile planned : planned_profiles) {
-                dflash_graphs.profiles.emplace_back();
-                DecodeGraphProfile& profile    = dflash_graphs.profiles.back();
-                profile.batch_size             = batch_size;
-                profile.min_execution_frontier = planned.min;
-                profile.max_execution_frontier = planned.max;
-                profile.topology_class =
-                    planned.topology_class * max_concurrency + (batch_size - 1U);
-                const ops::CausalAttentionExecutionEnvelope target_envelope{
-                    1,
-                    static_cast<std::uint32_t>(std::min<std::uint64_t>(
-                        capacity, static_cast<std::uint64_t>(planned.max) + draft_window + 1ULL))};
-
-                execution::capture_dflash_decode_batch(
+        if (is_masked_draft_backend(speculative_backend)) {
+            const auto batch_one_profiles =
+                dflash_graph_profiles(speculative_backend, capacity, draft_window, 1);
+            validate_graph_profiles(batch_one_profiles, capacity - 1, "DFlash");
+            execution::DFlashBatchContext dflash_state{
+                execution_core(),
+                decoder->text_kv,
+                *dflash,
+                *io.dflash_decode,
+                *dflash_host_ingress,
+                *dflash_host_egress,
+                state_images->continuation_hidden_store(),
+                peer ? &*peer->io.dflash_decode : nullptr,
+                peer ? &peer->state_images->continuation_hidden_store() : nullptr};
+            const GraphExecutionProfile code_warm = batch_one_profiles.front();
+            const ops::CausalAttentionExecutionEnvelope code_warm_target{
+                1, static_cast<std::uint32_t>(std::min<std::uint64_t>(
+                       capacity, static_cast<std::uint64_t>(code_warm.max) + draft_window + 1ULL))};
+            // As for ordinary and MTP rounds: every batch size is warmed eagerly on both devices at
+            // tp 2 before any capture, since batch shape selects kernels.
+            const std::uint32_t warm_batches = tensor_parallel() ? max_concurrency : 1U;
+            for (std::uint32_t batch_size = 1; batch_size <= warm_batches; ++batch_size) {
+                prepare_representative(code_warm.min, batch_size);
+                synchronize_all();
+                execution::dflash_decode_batch(
                     dflash_state, static_cast<std::int32_t>(batch_size), draft_window,
-                    dflash_envelopes(planned.min, planned.max, draft_window), target_envelope,
-                    profile.definition);
+                    dflash_envelopes(code_warm.min, code_warm.max, draft_window), code_warm_target,
+                    nullptr);
+                synchronize_all();
+            }
+
+            dflash_graphs.profiles.reserve(batch_one_profiles.size() * max_concurrency);
+            for (std::uint32_t batch_size = 1; batch_size <= max_concurrency; ++batch_size) {
+                const auto planned_profiles = batch_size == 1
+                                                  ? batch_one_profiles
+                                                  : dflash_graph_profiles(speculative_backend, capacity,
+                                                                          draft_window, batch_size);
+                validate_graph_profiles(planned_profiles, capacity - 1, "DFlash");
+                for (const GraphExecutionProfile planned : planned_profiles) {
+                    dflash_graphs.profiles.emplace_back();
+                    DecodeGraphProfile& profile    = dflash_graphs.profiles.back();
+                    profile.batch_size             = batch_size;
+                    profile.min_execution_frontier = planned.min;
+                    profile.max_execution_frontier = planned.max;
+                    profile.topology_class =
+                        planned.topology_class * max_concurrency + (batch_size - 1U);
+                    const ops::CausalAttentionExecutionEnvelope target_envelope{
+                        1,
+                        static_cast<std::uint32_t>(std::min<std::uint64_t>(
+                            capacity, static_cast<std::uint64_t>(planned.max) + draft_window + 1ULL))};
+
+                    execution::capture_dflash_decode_batch(
+                        dflash_state, static_cast<std::int32_t>(batch_size), draft_window,
+                        dflash_envelopes(planned.min, planned.max, draft_window), target_envelope,
+                        profile.definition);
+                }
             }
         }
-    }
 
-    if (!ordinary_graphs.profiles.empty()) {
-        instantiate_graph_family(ordinary_graphs, "ordinary", device, prepare_representative,
-                                 synchronize_all);
-    }
-    if (speculative_backend == SpeculativeBackend::Mtp) {
-        instantiate_graph_family(mtp_graphs, "MTP", device, prepare_representative,
-                                 synchronize_all);
-    }
-    if (is_masked_draft_backend(speculative_backend)) {
-        instantiate_graph_family(dflash_graphs, "DFlash", device, prepare_representative,
-                                 synchronize_all);
+        if (!ordinary_graphs.profiles.empty()) {
+            instantiate_graph_family(ordinary_graphs, "ordinary", device, prepare_representative,
+                                     synchronize_graphs);
+        }
+        if (speculative_backend == SpeculativeBackend::Mtp) {
+            instantiate_graph_family(mtp_graphs, "MTP", device, prepare_representative,
+                                     synchronize_graphs);
+        }
+        if (is_masked_draft_backend(speculative_backend)) {
+            instantiate_graph_family(dflash_graphs, "DFlash", device, prepare_representative,
+                                     synchronize_graphs);
+        }
+    };
+    for (;;) {
+        try {
+            capture_and_instantiate();
+            break;
+        } catch (const std::runtime_error&) {
+            // synchronize_devices() found the hang word set: both devices are idle, the executables
+            // are discarded by degrade_peer_mailbox() before the mailbox they address.
+            if (!peer_mailbox || !peer_mailbox->hang_reported() || !degrade_peer_mailbox()) {
+                throw;
+            }
+        }
     }
 
     clear_stable_controls();

@@ -221,7 +221,7 @@ The table lists executable defaults. The examples above select FP8 KV and MTP3.
 | `--vision-device N` | CUDA device that holds the Vision tower and encodes; equal to `--device` on one GPU, one of `--devices` at `--tp 2` | `--device` |
 | `--max-vision-tokens N` | merged Vision tokens of one image or video item (`64..16384`); larger media are resized | `16384` |
 | `--no-cuda-graph` | disable CUDA Graph decode | graphs on |
-| `--no-tp-mailbox` | keep the captured `--tp 2` all-reduces on cross-device copies; see [Two GPUs](#two-gpus). Without it the mailbox is probed once at startup and dropped by itself when the probe times out or exceeds 50 ms (`NINFER_TP_MAILBOX_PROBE=off` skips the probe, `=fail` forces the fallback) | mailbox on without P2P, probed at startup |
+| `--no-tp-mailbox` | keep the captured `--tp 2` all-reduces on cross-device copies; see [Two GPUs](#two-gpus). Without it the mailbox is probed once at startup and dropped by itself when the probe times out or exceeds 50 ms (`NINFER_TP_MAILBOX_PROBE=off` skips the probe, `=fail` forces the fallback); an exchange that hangs in a decode graph's first launch moves the MTP draft phase, then everything, to the copies (`NINFER_TP_MAILBOX_DRAFT=copies` starts with the draft phase there; `NINFER_TP_MAILBOX_FAULT=draft\|any` simulates the hang) | mailbox on without P2P, probed at startup |
 | `--chat-template FILE` | use a local Jinja template | artifact template |
 | `--no-thinking` | disable thinking | template default |
 | `--thinking-budget N` | positive model-origin thinking-token cap; omitted means unlimited | unset |
