@@ -1,5 +1,6 @@
 #pragma once
 #include "core/device.h"
+#include "ops/launcher/kernel_attr_once.h"
 
 namespace ninfer::ops::detail {
 template <int Bytes>
@@ -18,9 +19,10 @@ template <int Bytes, auto Kernel, bool Dynamic = false>
 int nvfp4_prepare_shared() {
     static_assert(Bytes <= 99 * 1024);
     if constexpr (Bytes > 48 * 1024) {
-        static const cudaError_t status =
-            cudaFuncSetAttribute(Kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, Bytes);
-        CUDA_CHECK(status);
+        // Per device: a function attribute set only on the first device leaves the other rank at
+        // the default 48 KiB (kernel_attr_once.h).
+        static FuncAttrPerDevice attribute;
+        attribute.ensure(Kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, Bytes);
         return Bytes;
     } else {
         return Dynamic ? Bytes : 0;
