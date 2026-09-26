@@ -545,6 +545,8 @@ Prefill 成本按硬件类别与实际 Text/Vision 配置、绑定、Use 派生�
 
 ### 8.1 双 GPU 张量并行
 
+完整设计（权重切分、传输、双设备 CUDA Graph、镜像状态、测试与已知限制）见[双 GPU 张量并行](tensor-parallel.md)。
+
 `EngineOptions.tp = 2` 时 Engine 为 `devices` 中的每个 rank 建立一个 `DeviceContext`，组成
 `ExecutionContext`，并在驱动允许时启用 peer access（否则 collectives 经 host staging 复制；CUDA Graph
 中单个请求激活的 all-reduce 经 pinned host mailbox 交换）。
