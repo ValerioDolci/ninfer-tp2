@@ -455,8 +455,9 @@ void OperationalLog::engine_capacity(const GenerationService& service) const {
     if (engine.tp == 2) {
         logger_->info("tensor parallel | tp 2 on devices {},{} | p2p {} | KV, StateImages and "
                       "runtime reserved per rank | Host context-cache tiers off (rank 1 state has "
-                      "no Host replica) | {} Device checkpoint StateImages; prefill checkpoints "
-                      "are skipped when they are full (raise --device-state-slots for many "
+                      "no Host replica) | {} Device checkpoint StateImages; a prefill checkpoint that "
+                      "finds them full first reclaims idle private continuations and is skipped "
+                      "only when none can be released (raise --device-state-slots for many "
                       "conversations)",
                       engine.devices.at(0), engine.devices.at(1),
                       service.load_summary().peer_access ? "on" : "off (host-staged copies)",
