@@ -571,7 +571,7 @@ WorkspacePlan build_tensor_parallel_workspace_plan(const SequencePlanImpl& plan)
                         reserve_scratch(layout, ops::gated_delta_net_workspace_capacity_bytes(
                                                     dimension(shard.gdn->linear_num_key_heads),
                                                     dimension(shard.gdn->linear_num_value_heads),
-                                                    true, first, last));
+                                                    first, last));
                     }
                     (void)workspace::gdn_normalized_output(layout, shard, last);
                     row_parallel_scratch(layout, gdn.output, first, last);

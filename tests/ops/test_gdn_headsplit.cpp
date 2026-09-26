@@ -311,6 +311,8 @@ struct Runner {
     int qk_heads    = 0;
     int value_heads = 0;
     int max_tokens  = 0;
+    // The chunked route sizes its value tiles from the device's SM count (upstream 0784e76f).
+    int multiprocessor_count = 0;
 
     DeviceBuffer q, k, v, g, beta, state, out;
     // Held by optional so every allocation (arena included) happens inside the constructor body,
@@ -337,8 +339,10 @@ struct Runner {
         // The query legitimately returns 0 below one full 64-token chunk (the recurrent route
         // needs no staging); an arena still has to own something, so floor it.
         workspace.emplace(std::max<std::size_t>(ops::gated_delta_net_workspace_capacity_bytes(
-                                                    qk_heads, value_heads, true, 1, max_tokens),
+                                                    qk_heads, value_heads, 1, max_tokens),
                                                 256));
+        CUDA_CHECK(cudaDeviceGetAttribute(&multiprocessor_count, cudaDevAttrMultiProcessorCount,
+                                          device));
     }
 
     void load_state(const std::vector<float>& values) {
@@ -387,7 +391,8 @@ struct Runner {
         Tensor st(state.p, DType::FP32, {kStateDim, kStateDim, value_heads});
         Tensor ot(out.p, DType::BF16, {kStateDim, value_heads, T});
         auto guard = workspace->scope();
-        ops::gated_delta_net(qt, kt, vt, gt, bt, kScale, normalize_qk, *workspace, st, ot, nullptr);
+        ops::gated_delta_net(qt, kt, vt, gt, bt, kScale, normalize_qk, *workspace, st, ot,
+                             DeviceExecutionView{nullptr, multiprocessor_count});
         cuda_synchronize();
     }
 
@@ -532,6 +537,9 @@ void oracle_case(int tokens, bool normalize_qk, std::uint64_t salt) {
     const std::string tag =
         "gdn oracle T=" + std::to_string(tokens) + (normalize_qk ? " normalized" : " raw");
     const Global world = make_global(tokens, salt, normalize_qk);
+    // The registered criteria of the route this T takes: recurrent below 16 tokens, the chunked
+    // profile from 16 on (gdn_criteria.h, upstream 0784e76f).
+    const Criteria& criteria = gated_delta_net_prefill_criteria(tokens, normalize_qk);
 
     // Control: the tp1 geometry against the same oracle, on the same data.
     OracleLeg parent_out{};
@@ -544,9 +552,9 @@ void oracle_case(int tokens, bool normalize_qk, std::uint64_t salt) {
         const gdn_ref::Result ref =
             gdn_ref::evaluate(in, static_cast<double>(kScale), normalize_qk);
         parent_out   = oracle_leg(tag + " tp1 out vs oracle", doubles(parent.read_out(tokens)),
-                                  ref.out, gated_delta_net_output_bf16_criterion());
+                                  ref.out, criteria.out);
         parent_state = oracle_leg(tag + " tp1 state vs oracle", doubles(parent.read_state()),
-                                  ref.final_state, gated_delta_net_state_fp32_criterion());
+                                  ref.final_state, criteria.state);
     }
 
     for (int rank = 0; rank < kRanks; ++rank) {
@@ -559,12 +567,12 @@ void oracle_case(int tokens, bool normalize_qk, std::uint64_t salt) {
         const std::string name = tag + " rank " + std::to_string(rank);
         const OracleLeg out_leg =
             oracle_leg(name + " out vs oracle", doubles(shard.read_out(tokens)), ref.out,
-                       gated_delta_net_output_bf16_criterion());
+                       criteria.out);
         const OracleLeg state_leg =
             oracle_leg(name + " state vs oracle", doubles(shard.read_state()), ref.final_state,
-                       gated_delta_net_state_fp32_criterion());
-        judge(name + " out", out_leg, parent_out, gated_delta_net_output_bf16_criterion());
-        judge(name + " state", state_leg, parent_state, gated_delta_net_state_fp32_criterion());
+                       criteria.state);
+        judge(name + " out", out_leg, parent_out, criteria.out);
+        judge(name + " state", state_leg, parent_state, criteria.state);
     }
 }
 
@@ -879,9 +887,9 @@ void contract_cases() {
     // The shard geometry must be admitted by the public capacity query, and the query must
     // actually shrink with the head count (a query that ignored H_v would pass vacuously).
     const std::size_t parent =
-        ops::gated_delta_net_workspace_capacity_bytes(kQkHeads, kValueHeads, true, 1, 4141);
+        ops::gated_delta_net_workspace_capacity_bytes(kQkHeads, kValueHeads, 1, 4141);
     const std::size_t shard =
-        ops::gated_delta_net_workspace_capacity_bytes(kLocalQk, kLocalValue, true, 1, 4141);
+        ops::gated_delta_net_workspace_capacity_bytes(kLocalQk, kLocalValue, 1, 4141);
     if (shard == 0 || shard >= parent) {
         fail("workspace capacity did not shrink with the head split: parent " +
              std::to_string(parent) + ", shard " + std::to_string(shard));
@@ -892,8 +900,7 @@ void contract_cases() {
     // than 16 qk heads, it is simply not a whole number of groups of them.
     for (const auto pair : std::array<std::pair<int, int>, 2>{{{9, 48}, {16, 24}}}) {
         try {
-            (void)ops::gated_delta_net_workspace_capacity_bytes(pair.first, pair.second, true, 1,
-                                                                64);
+            (void)ops::gated_delta_net_workspace_capacity_bytes(pair.first, pair.second, 1, 64);
             fail("workspace query accepted an invalid head map " + std::to_string(pair.first) +
                  "|" + std::to_string(pair.second));
         } catch (const std::invalid_argument&) {}

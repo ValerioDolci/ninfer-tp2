@@ -1562,6 +1562,10 @@ cudaStream_t TextContext::rank_stream(int rank) const noexcept {
     return rank == 0 ? ctx_.stream : tp_->execution->dev[1]->stream;
 }
 
+DeviceExecutionView TextContext::rank_execution_view(int rank) const noexcept {
+    return rank == 0 ? ctx_.execution_view() : tp_->execution->dev[1]->execution_view();
+}
+
 LinearAttentionStatePool& TextContext::rank_state(int rank) const noexcept {
     return rank == 0 ? state_ : *tp_->linear_attention;
 }
@@ -1901,7 +1905,7 @@ void TextContext::gdn_mix_tp2(const RankBlocks& w, RankTensors& x, int gidx, Pha
                 rank_state(rank).recurrent_slot(layer, linear_state_destination_slot_);
             ops::gated_delta_net(q_recurrent, k_recurrent, v_recurrent, g[r], beta[r], scale,
                                  /*normalize_qk=*/true, *ws[r], recurrent_state_in,
-                                 recurrent_state_out, o[r], s);
+                                 recurrent_state_out, o[r], rank_execution_view(rank));
         }
     });
 
