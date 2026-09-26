@@ -126,7 +126,8 @@ struct SamplingParams {
 };
 
 // Protocol-level effort vocabulary. Each wire adapter accepts the values from
-// its external contract; translation passes explicit values to the selected template.
+// its external contract; translation folds them onto the tiers the selected
+// template distinguishes (see resolve_prompt_semantics).
 enum class RequestedReasoningEffort : std::uint8_t {
     None,
     Minimal,
@@ -135,6 +136,7 @@ enum class RequestedReasoningEffort : std::uint8_t {
     High,
     XHigh,
     Max,
+    Adaptive,
 };
 
 [[nodiscard]] constexpr std::optional<RequestedReasoningEffort>
@@ -146,6 +148,7 @@ parse_requested_reasoning_effort(std::string_view value) noexcept {
     if (value == "high") { return RequestedReasoningEffort::High; }
     if (value == "xhigh") { return RequestedReasoningEffort::XHigh; }
     if (value == "max") { return RequestedReasoningEffort::Max; }
+    if (value == "adaptive") { return RequestedReasoningEffort::Adaptive; }
     return std::nullopt;
 }
 
@@ -166,6 +169,8 @@ requested_reasoning_effort_name(RequestedReasoningEffort effort) noexcept {
         return "xhigh";
     case RequestedReasoningEffort::Max:
         return "max";
+    case RequestedReasoningEffort::Adaptive:
+        return "adaptive";
     }
     return {};
 }
