@@ -13,8 +13,8 @@
 namespace ninfer::ops::detail {
 
 // The gate/up problems are [34816,5120] and its two-device output-row half [17408,5120]. They share
-// the input width, so the workspace does not depend on which one runs; the launchers below resolve
-// the geometry from the weight's shape.
+// the input width, so the workspace does not depend on which one runs; the launchers below take the
+// problem from the weight's shape.
 [[nodiscard]] std::size_t fp8_linear_swiglu_workspace_capacity_bytes(LinearPolicy policy,
                                                                      std::int32_t min_tokens,
                                                                      std::int32_t max_tokens);
@@ -23,6 +23,7 @@ void fp8_linear_swiglu_decode_launch(const Tensor& x, const Weight& weight, Tens
                                      cudaStream_t stream);
 void fp8_linear_swiglu_small_t_launch(const Tensor& x, const Weight& weight, Tensor& out,
                                       cudaStream_t stream);
+void fp8_linear_swiglu_matrix_launch(const Tensor&, const Weight&, Tensor&, cudaStream_t);
 void fp8_linear_swiglu_a8_launch(const Tensor& x, const Weight& weight, Tensor& out,
                                  WorkspaceArena& workspace, cudaStream_t stream);
 

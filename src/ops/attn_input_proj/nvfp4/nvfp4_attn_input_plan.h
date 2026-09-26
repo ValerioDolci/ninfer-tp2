@@ -4,7 +4,7 @@
 #include "core/arena.h"
 #include "core/tensor.h"
 #include "ninfer/ops/linear.h"
-#include "ops/linear/nvfp4/nvfp4_w4a4_plan.h"
+#include "ops/linear/nvfp4/nvfp4_a4_plan.h"
 
 #include <cuda_runtime.h>
 
@@ -20,15 +20,18 @@ namespace ninfer::ops::detail {
 // Every launcher and nvfp4_attn_input_dispatch() serve the whole [14336,5120] parent and one
 // device's [7168,5120] two-device shard (nvfp4_attn_input_output.cuh), selected by `weight.n`.
 // Both share K, so the routes, their token cutoffs and the workspace capacity are the same.
+void nvfp4_attn_input_a16_launch(const Tensor& x, const Weight& weight, Tensor& q, Tensor& gate,
+                                 Tensor& k, Tensor& v, cudaStream_t stream);
+
 void nvfp4_attn_input_decode_launch(const Tensor& x, const Weight& weight, Tensor& q, Tensor& gate,
                                     Tensor& k, Tensor& v, cudaStream_t stream);
 
 void nvfp4_attn_input_small_t_launch(const Tensor& x, const Weight& weight, Tensor& q, Tensor& gate,
                                      Tensor& k, Tensor& v, cudaStream_t stream);
 
-void nvfp4_attn_input_w4a4_launch(const Tensor& x, const Weight& weight, Tensor& q, Tensor& gate,
-                                  Tensor& k, Tensor& v, Nvfp4W4a4Workspace workspace,
-                                  cudaStream_t stream);
+void nvfp4_attn_input_a4_launch(const Tensor& x, const Weight& weight, Tensor& q, Tensor& gate,
+                                Tensor& k, Tensor& v, Nvfp4A4Workspace workspace,
+                                cudaStream_t stream);
 
 void nvfp4_attn_input_dispatch(const Tensor& x, const Weight& weight, Tensor& q, Tensor& gate,
                                Tensor& k, Tensor& v, LinearPolicy policy, WorkspaceArena* workspace,

@@ -3,8 +3,8 @@
 
 #include "core/device.h"
 #include "ops/attn_input_proj/nvfp4/nvfp4_attn_input_output.cuh"
-#include "ops/linear/nvfp4/nvfp4_config.h"
-#include "ops/linear/nvfp4/nvfp4_gemv.cuh"
+#include "ops/linear/nvfp4/nvfp4_schedule.cuh"
+#include "ops/linear/nvfp4/nvfp4_template_launch.cuh"
 
 #include <cuda_bf16.h>
 
@@ -17,7 +17,7 @@ void launch(const Tensor& x, const Weight& weight, Tensor& q, Tensor& gate, Tens
     using Geometry = typename Problem::Geometry;
     using Output   = typename Problem::Output;
     using Schedule =
-        Nvfp4GemvSchedule<8, 2, 16, 4, Nvfp4ScaleAccess::StagedRaw, Nvfp4CodeCache::Default, 2>;
+        Nvfp4A16GemvSchedule<8, 2, 16, 4, Nvfp4ScaleAccess::StagedRaw, Nvfp4CodeCache::Default, 2>;
 
     const Output output{
         static_cast<__nv_bfloat16*>(q.data),
@@ -25,13 +25,8 @@ void launch(const Tensor& x, const Weight& weight, Tensor& q, Tensor& gate, Tens
         static_cast<__nv_bfloat16*>(gate.data),
         static_cast<__nv_bfloat16*>(v.data),
     };
-    constexpr int kBlocks              = Geometry::kOutputRows / Schedule::kRowsPerCta;
-    const float inverse_weight_divisor = 1.0F / weight.weight_scale_divisor;
-    nvfp4_gemv_kernel<Geometry, Schedule><<<kBlocks, Schedule::kThreads, 0, stream>>>(
-        static_cast<const __nv_bfloat16*>(x.data), static_cast<const std::uint8_t*>(weight.qdata),
-        static_cast<const std::uint8_t*>(weight.scales), inverse_weight_divisor,
-        Nvfp4IdentityEpilogue{}, output);
-    CUDA_CHECK(cudaGetLastError());
+    launch_nvfp4_a16_gemv<Nvfp4ScheduleInstance<Schedule, Geometry::kInputRows>>(
+        nvfp4_a16_operands(x, weight), output, LinearIdentityEpilogue{}, stream);
 }
 
 } // namespace

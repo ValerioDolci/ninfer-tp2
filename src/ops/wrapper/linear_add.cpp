@@ -3,10 +3,10 @@
 
 #include "ops/common/split_launch.h"
 #include "ops/linear_add/bf16/bf16_linear_add_plan.h"
-#include "ops/linear/fp8/fp8_config.h"
+#include "ops/linear/fp8/fp8_geometry.h"
 #include "ops/linear/fp8/fp8_format.h"
 #include "ops/linear/linear_dispatch.h"
-#include "ops/linear/nvfp4/nvfp4_config.h"
+#include "ops/linear/nvfp4/nvfp4_layout.h"
 #include "ops/linear/nvfp4/nvfp4_format.h"
 #include "ops/linear_add/fp8/fp8_linear_add_plan.h"
 #include "ops/linear_add/nvfp4/nvfp4_linear_add_plan.h"
