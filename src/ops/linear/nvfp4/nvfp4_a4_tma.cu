@@ -35,6 +35,18 @@ void launch_nvfp4_a4_tma_linear(Nvfp4GeometryId problem, const Nvfp4A4Operands& 
     case Nvfp4GeometryId::N5120K17408:
         launch<17408>(p, output, stream);
         return;
+    // The two-device shards keep their parent's TMA schedule: the [17408,5120] gate/up half the
+    // [34816,5120] weight-code L2 promotion, the [5120,8704] and [5120,3072] input-column halves
+    // the default of [5120,17408] and [5120,6144].
+    case Nvfp4GeometryId::N17408K5120:
+        launch<5120, CU_TENSOR_MAP_L2_PROMOTION_L2_128B>(p, output, stream);
+        return;
+    case Nvfp4GeometryId::N5120K8704:
+        launch<8704>(p, output, stream);
+        return;
+    case Nvfp4GeometryId::N5120K3072:
+        launch<3072>(p, output, stream);
+        return;
     }
     throw std::invalid_argument("NVFP4 TMA linear: unsupported geometry");
 }

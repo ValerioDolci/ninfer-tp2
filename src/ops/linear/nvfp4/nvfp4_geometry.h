@@ -41,9 +41,10 @@ using Nvfp4N8192K5120 = Nvfp4Geometry<8192, 5120>;
 
 // First token count at which nvfp4 linear_add over the attention output ([5120,6144] and its
 // two-device half [5120,3072]) and over the MLP down projection ([5120,17408] and [5120,8704])
-// takes the W4A4 route. linear() over each half uses the same crossover, so rank 0's linear_add
-// and rank 1's linear() in one row-parallel pair always take the same route.
-inline constexpr std::int32_t kNvfp4OutputFamilyFirstA4Tokens = 7;
+// takes the A4 route (nvfp4_linear_add_plan.cpp: 17 and 8 since upstream fc3993d8, 7 and 8
+// before). linear() over each half uses the same crossover, so rank 0's linear_add and rank 1's
+// linear() in one row-parallel pair always take the same route.
+inline constexpr std::int32_t kNvfp4OutputFamilyFirstA4Tokens = 17;
 inline constexpr std::int32_t kNvfp4DownFamilyFirstA4Tokens   = 8;
 
 using Nvfp4Activation3072Geometry  = Nvfp4ActivationGeometry<3072>;

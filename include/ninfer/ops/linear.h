@@ -86,9 +86,9 @@ enum class LinearPolicy : std::uint8_t {
  * `[5120,8704]`, and BF16 registers `[7168,5120]` and `[5120,3072]`, and Q8 registers
  * `[5120,5120]`, `[7168,5120]`, `[17408,5120]`, `[5120,3072]` and `[5120,8704]` (the MTP halves),
  * each at every positive T and resolving to the routes of the problem it halves, except that FP8
- * `[5120,3072]` takes A8 from T=22 and NVFP4 `[5120,3072]` takes A4 from T=7, as linear_add() over
- * the same half does. Text and MTP packed-weight problems accept
- * every positive column extent T. Registered Vision problems accept raw-patch P in
+ * `[5120,3072]` takes A8 from T=22, as linear_add() over the same half does (NVFP4 `[5120,3072]`
+ * takes A4 from T=17 like both its parent and linear_add()). Text and MTP packed-weight problems
+ * accept every positive column extent T. Registered Vision problems accept raw-patch P in
  * `{4,8,...,131072}` or merged-token V in `[1,32768]`; a matrix column does not inherently
  * represent a text token. FP32 is unsupported.
  *
