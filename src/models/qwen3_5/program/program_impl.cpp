@@ -185,8 +185,16 @@ ProgramImpl::ProgramImpl(const execution::Parameters& parameters_in, const Seque
                     const std::size_t slot_bytes =
                         static_cast<std::size_t>(parameters.model.config().text.hidden_size) *
                         (static_cast<std::size_t>(draft_window) + 1U) * sizeof(std::uint16_t);
-                    peer_mailbox.emplace(*execution_context, slot_bytes);
+                    // NINFER_TP_MAILBOX_LEGACY=1 keeps the original exchange kernel, for A/B
+                    // runs on one binary; both kernels produce the same bits.
+                    const char* legacy_env = std::getenv("NINFER_TP_MAILBOX_LEGACY");
+                    const ops::PeerExchangeKernel kernel =
+                        legacy_env != nullptr && std::string_view(legacy_env) == "1"
+                            ? ops::PeerExchangeKernel::Legacy
+                            : ops::PeerExchangeKernel::Pipelined;
+                    peer_mailbox.emplace(*execution_context, slot_bytes, 2, kernel);
                     peer_events->attach_mailbox(&*peer_mailbox);
+                    tp_transport_status.exchange_kernel = ops::peer_exchange_kernel_name(kernel);
                     probe_peer_mailbox();
                 } else {
                     tp_transport_status.transport = "copies";
@@ -607,7 +615,8 @@ void ProgramImpl::probe_peer_mailbox() {
         tp_transport_status.fallback = "the startup probe exchange took " +
                                        std::to_string(static_cast<long>(elapsed_ms)) + " ms";
     }
-    tp_transport_status.transport = "copies";
+    tp_transport_status.transport       = "copies";
+    tp_transport_status.exchange_kernel = {};
     peer_events->attach_mailbox(nullptr);
     peer_mailbox.reset();
 }
@@ -634,7 +643,8 @@ bool ProgramImpl::degrade_peer_mailbox() {
     ordinary_graphs = {};
     mtp_graphs      = {};
     dflash_graphs   = {};
-    const std::size_t slot_bytes = peer_mailbox->slot_bytes();
+    const std::size_t slot_bytes          = peer_mailbox->slot_bytes();
+    const ops::PeerExchangeKernel kernel = peer_mailbox->kernel();
     peer_events->attach_mailbox(nullptr);
     peer_mailbox.reset();
     const std::string previous = tp_transport_status.transport;
@@ -645,13 +655,14 @@ bool ProgramImpl::degrade_peer_mailbox() {
     if (speculative_backend == SpeculativeBackend::Mtp &&
         !tp_execution->staged_draft_collectives) {
         tp_execution->staged_draft_collectives = true;
-        peer_mailbox.emplace(*execution_context, slot_bytes);
+        peer_mailbox.emplace(*execution_context, slot_bytes, 2, kernel);
         peer_events->attach_mailbox(&*peer_mailbox);
         tp_transport_status.transport = "mailbox, MTP draft on copies";
         return true;
     }
     tp_execution->staged_draft_collectives = false;
     tp_transport_status.transport          = "copies";
+    tp_transport_status.exchange_kernel    = {};
     return true;
 }
 
