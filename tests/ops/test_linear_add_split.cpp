@@ -24,7 +24,9 @@
 
 #include "core/device.h"
 #include "core/weight.h"
+#include "ops/linear/nvfp4/nvfp4_a4_plan.h"
 #include "ops/linear/nvfp4/nvfp4_geometry.h"
+#include "ops/linear_add/nvfp4/nvfp4_linear_add_plan.h"
 #include "ops/op_tester.h"
 #include "ops/quantized_weight.h"
 #include "ops/split_test_support.h"
@@ -95,21 +97,22 @@ constexpr ReductionCriterion kSplitCriterion{2.0 * kBf16UnitRoundoff, 0.0, 2.0 *
 // The FP8 A8 Linear tolerance: a row split changes each rank's per-token activation scale.
 constexpr ReductionCriterion kFp8A8RowSplitCriterion{0.04, kBf16UnitRoundoff, 0.06};
 
-ReductionCriterion criterion_for(const Case& test_case, ops::LinearPolicy policy,
-                                 std::int32_t tokens) {
+ReductionCriterion criterion_for(const Case& test_case, ops::LinearPolicy policy) {
     if (test_case.qtype == QType::FP8_E4M3FN_ROW_BF16 && ops::allows_a8(policy)) {
         return kFp8A8RowSplitCriterion;
     }
-    const bool down = test_case.k == 17408;
-    if (nvfp4_half_route_diverges(
-            test_case.qtype, policy, tokens,
-            down ? ops::detail::kNvfp4DownHalfFirstA4Tokens
-                 : ops::detail::kNvfp4OutputHalfFirstA4Tokens,
-            down ? ops::detail::kNvfp4DownFamilyFirstA4Tokens
-                 : ops::detail::kNvfp4OutputFamilyFirstA4Tokens)) {
-        return kNvfp4A4AgainstA16Criterion;
-    }
     return kSplitCriterion;
+}
+
+// Whether the halves take A4 at `tokens` while linear_add() over the whole weight still takes A16
+// (split_test_support.h); the reference then runs the whole weight's A4 launcher.
+bool a4_reference(const Case& test_case, ops::LinearPolicy policy, std::int32_t tokens) {
+    const bool down = test_case.k == 17408;
+    return nvfp4_half_route_diverges(test_case.qtype, policy, tokens,
+                                     down ? ops::detail::kNvfp4DownHalfFirstA4Tokens
+                                          : ops::detail::kNvfp4OutputHalfFirstA4Tokens,
+                                     down ? ops::detail::kNvfp4DownFamilyFirstA4Tokens
+                                          : ops::detail::kNvfp4OutputFamilyFirstA4Tokens);
 }
 
 int run_case(const Case& test_case, const ExecutionContext& ec, const ops::PeerEvents& events) {
@@ -180,15 +183,25 @@ int run_case(const Case& test_case, const ExecutionContext& ec, const ops::PeerE
             set_device(ec, 0);
             GuardedDeviceBuffer reference(bytes);
             reference.copy_from_host(residual_bits.data(), bytes);
-            DeviceArena reference_arena(
-                std::max<std::size_t>(ops::linear_add_workspace_capacity_bytes(
-                                          test_case.qtype, n, k, policy, tokens, tokens),
-                                      1));
+            const bool whole_a4 = a4_reference(test_case, policy, tokens);
+            DeviceArena reference_arena(std::max<std::size_t>(
+                whole_a4 ? ops::detail::nvfp4_a4_workspace_capacity_bytes(tokens, k)
+                         : ops::linear_add_workspace_capacity_bytes(test_case.qtype, n, k, policy,
+                                                                    tokens, tokens),
+                1));
             const Tensor reference_x(parent_x.p, DType::BF16, {k, tokens});
             Tensor reference_residual(reference.data(), DType::BF16, {n, tokens});
             cuda_check(cudaDeviceSynchronize(), "cudaDeviceSynchronize");
-            ops::linear_add(reference_x, parent_device.weight, reference_residual, policy,
-                            reference_arena, ec.dev[0]->stream);
+            if (whole_a4) {
+                const auto scratch =
+                    ops::detail::allocate_nvfp4_a4_workspace(reference_arena, tokens, k);
+                ops::detail::nvfp4_linear_add_a4_launch(reference_x, parent_device.weight,
+                                                        reference_residual, scratch,
+                                                        ec.dev[0]->stream);
+            } else {
+                ops::linear_add(reference_x, parent_device.weight, reference_residual, policy,
+                                reference_arena, ec.dev[0]->stream);
+            }
             cuda_check(cudaStreamSynchronize(ec.dev[0]->stream), "cudaStreamSynchronize");
             failures += reference.verify_guards(label + " reference");
             const std::vector<double> expected = from_device_bf16(reference.data(), elements);
@@ -223,7 +236,7 @@ int run_case(const Case& test_case, const ExecutionContext& ec, const ops::PeerE
                                          events);
             synchronize_both(ec);
 
-            const ReductionCriterion criterion = criterion_for(test_case, policy, tokens);
+            const ReductionCriterion criterion = criterion_for(test_case, policy);
             std::array<std::vector<double>, 2> observed;
             for (std::size_t rank = 0; rank < 2; ++rank) {
                 const std::string rank_label = label + " rank " + std::to_string(rank);
@@ -413,7 +426,7 @@ int main() {
         // schedule seams, and (at 1024) the whole problem's TMA route.
         // The NVFP4 A4 floors come from the constants the linear_add plan and each half's linear()
         // read, so the cases straddle both crossovers wherever they sit; between the halves' floor
-        // and the parent's the reference runs A16 (kNvfp4A4AgainstA16Criterion).
+        // and the parent's the reference runs the whole weight's A4 launcher (a4_reference).
         constexpr std::int32_t kDownA4       = ops::detail::kNvfp4DownFamilyFirstA4Tokens;
         constexpr std::int32_t kOutputA4     = ops::detail::kNvfp4OutputFamilyFirstA4Tokens;
         constexpr std::int32_t kDownHalfA4   = ops::detail::kNvfp4DownHalfFirstA4Tokens;
