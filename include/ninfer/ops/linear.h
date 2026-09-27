@@ -85,6 +85,7 @@ enum class LinearPolicy : std::uint8_t {
  * `[5120,3072]` and `[5120,8704]`, NVFP4 registers `[17408,5120]`, `[5120,3072]` and
  * `[5120,8704]`, and BF16 registers `[7168,5120]` and `[5120,3072]`, and Q8 registers
  * `[5120,5120]`, `[7168,5120]`, `[17408,5120]`, `[5120,3072]` and `[5120,8704]` (the MTP halves),
+ * and Q4 registers `[65536,5120]` (the half of the `[131072,5120]` proposal head),
  * each at every positive T and resolving to the routes of the problem it halves, except that FP8
  * `[5120,3072]` takes A8 from T=22, as linear_add() over the same half does (NVFP4 `[5120,3072]`
  * takes A4 from T=17 like both its parent and linear_add()). Text and MTP packed-weight problems

@@ -1,6 +1,7 @@
 #include "models/qwen3_5/execution/parameters.h"
 
 #include "core/weight_view.h"
+#include "ninfer/ops/linear.h"
 
 #include <limits>
 #include <span>
@@ -333,7 +334,22 @@ Parameters::Parameters(const Model& source, int rank) : model(source), device(ra
     if (w.proposal && prepare.resident(w.proposal->head)) {
         proposal =
             ProposalParameters{prepare.linear(w.proposal->head), std::nullopt, w.proposal->rows};
-        if (w.proposal->token_ids) { proposal->token_ids = prepare.tensor(*w.proposal->token_ids); }
+        if (w.proposal->token_ids && prepare.resident(*w.proposal->token_ids)) {
+            proposal->token_ids = prepare.tensor(*w.proposal->token_ids);
+        }
+        if (proposal->split()) {
+            // A format without the half's route would fail only at the first proposal.
+            const auto& head = proposal->head;
+            try {
+                (void)ops::linear_workspace_capacity_bytes(head.weight.qtype, head.weight.n,
+                                                           head.weight.k, head.policy, 1, 1);
+            } catch (const std::invalid_argument& error) {
+                throw std::invalid_argument(
+                    "proposal/head: the tensor-parallel half [" + std::to_string(head.weight.n) +
+                    "," + std::to_string(head.weight.k) + "] has no registered linear route (" +
+                    error.what() + "); NINFER_TP_DRAFT_HEAD=primary keeps it whole on rank 0");
+            }
+        }
     }
 }
 
