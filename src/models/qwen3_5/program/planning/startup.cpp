@@ -494,9 +494,10 @@ WorkspacePlan build_tensor_parallel_workspace_plan(const SequencePlanImpl& plan)
     const auto& parameters = *plan.parameters;
     const auto& config     = parameters.model.config().text;
     const TextConfig shard = execution::shard_text_config(config, plan.tp);
-    if (plan.causal_scoring || plan.speculative_backend == SpeculativeBackend::DFlash) {
+    if (plan.speculative_backend == SpeculativeBackend::DFlash) {
         throw std::invalid_argument(
-            "tensor-parallel workspace supports ordinary, MTP and DFlash2 generation only");
+            "tensor-parallel workspace supports ordinary, MTP and DFlash2 generation and causal "
+            "scoring only");
     }
     const bool mtp = plan.speculative_backend == SpeculativeBackend::Mtp;
     if (mtp && (!parameters.mtp || !shard.attention)) {
@@ -694,7 +695,26 @@ WorkspacePlan build_tensor_parallel_workspace_plan(const SequencePlanImpl& plan)
         }
         return finish(target);
     };
-    if (plan.speculative_backend == SpeculativeBackend::None) {
+    if (plan.causal_scoring) {
+        // ProgramImpl::causal_score's flush of one score tile: rank 0 holds the gathered logits,
+        // the targets, the logprobs, its head half and the staging of rank 1's; rank 1 its head
+        // half. Its hidden copy lives in its persistent score_hidden.
+        const execution::LinearParameters& head = parameters.text.output_head;
+        const std::int32_t rows1 = dimension(config.vocab_size) - head.weight.n;
+        const auto tile          = static_cast<std::int32_t>(kCausalScoreTile);
+        const std::size_t head_scratch =
+            execution::output_head_split_workspace_bytes(head, 1, tile);
+        WorkspaceLayoutBuilder rank0;
+        reserve_matrix(rank0, DType::BF16, dimension(config.vocab_size), tile);
+        reserve_matrix(rank0, DType::I32, 1, tile);
+        reserve_matrix(rank0, DType::FP32, 1, tile);
+        (void)workspace::tp_logits(rank0, head.weight.n, rows1, tile, true);
+        reserve_scratch(rank0, head_scratch);
+        WorkspaceLayoutBuilder rank1;
+        (void)workspace::tp_logits(rank1, rows1, head.weight.n, tile, false);
+        reserve_scratch(rank1, head_scratch);
+        out.causal_score = std::max(finish(rank0), finish(rank1));
+    } else if (plan.speculative_backend == SpeculativeBackend::None) {
         for (std::int32_t batch = 1; batch <= static_cast<std::int32_t>(plan.max_concurrency);
              ++batch) {
             WorkspaceLayoutBuilder layout;
@@ -761,7 +781,8 @@ WorkspacePlan build_tensor_parallel_workspace_plan(const SequencePlanImpl& plan)
         }
     }
     out.general_capacity = std::max({out.text_prefill, out.ordinary_round, out.mtp_prefill,
-                                     out.mtp_round, out.dflash_context, out.dflash_round});
+                                     out.mtp_round, out.dflash_context, out.dflash_round,
+                                     out.causal_score});
     out.capacity = out.general_capacity;
     if (plan.features.vision) {
         // The rank that holds the tower encodes each item after its general prefix, as on one
@@ -1173,13 +1194,12 @@ void validate_target_options(const execution::Parameters& parameters,
                                         "Parameters of one two-device Model");
         }
         // The split schedule implements text and multimodal prefill, the ordinary decode round,
-        // the MTP round and the DFlash2 round of the dense Text model (TextContext); everything
-        // else runs on one device only.
-        if (options.purpose != EnginePurpose::Generation ||
-            options.speculative.backend == SpeculativeBackend::DFlash) {
+        // the MTP round and the DFlash2 round of the dense Text model (TextContext), and causal
+        // scoring over its text prefill; everything else runs on one device only.
+        if (options.speculative.backend == SpeculativeBackend::DFlash) {
             throw std::invalid_argument(
-                "tensor-parallel execution supports ordinary, MTP and DFlash2 generation only "
-                "(no DFlash or causal scoring)");
+                "tensor-parallel execution supports ordinary, MTP and DFlash2 generation and "
+                "causal scoring only (no DFlash)");
         }
         // The DFlash2 drafter runs whole on rank 0, while the full output head is split by
         // vocabulary rows across the ranks.

@@ -613,6 +613,9 @@ public:
         std::optional<ops::GdnReplayFoldPlan> replay_fold;
         qwen3_5::RoundState io;
         Tensor prefill_hidden;
+        // Causal scoring only: rank 1's copy of the staged hidden columns, the input of its half
+        // of the vocabulary-split output head.
+        Tensor score_hidden;
         // Views rank 1's ordinary decode frame; empty under a speculative backend.
         execution::OrdinaryPeerFrame ordinary;
     };
@@ -1232,6 +1235,9 @@ private:
     // Rank 1's copy of an I32 control scalar, uploaded on rank 1's stream.
     void set_peer_i32(Tensor& tensor, std::int32_t value);
     void attach_tensor_parallel_mirrors();
+    // Tensor-parallel causal scoring: the complete [V,C] logits of rank 0's staged hidden
+    // columns [H,C] through the vocabulary-split output head, gathered on rank 0.
+    void project_score_tile_split(const Tensor& hidden, const Tensor& logits);
     // Retains column `column` of the final-normed prefill chunk as `sequence`'s target tail
     // hidden. At tensor-parallel width 2 under MTP, rank 1 retains the same column of its own
     // chunk in the same StateImage slot of its mirror pool.

@@ -77,10 +77,8 @@ void validate_options(const EngineOptions& options) {
     if (options.tp == 2) {
         // Rejected before the artifact is read: the two-device schedule covers text and
         // multimodal prefill, the ordinary decode round, the MTP round and the DFlash2 round of
-        // the dense Text model only (models/qwen3_5/execution/text.h).
-        if (options.purpose != EnginePurpose::Generation) {
-            throw std::invalid_argument("Engine tp 2 does not support CausalScoring");
-        }
+        // the dense Text model, and causal scoring over its text prefill, only
+        // (models/qwen3_5/execution/text.h).
         if (options.speculative.backend == SpeculativeBackend::DFlash) {
             throw std::invalid_argument("Engine tp 2 does not support DFlash speculative decoding");
         }
