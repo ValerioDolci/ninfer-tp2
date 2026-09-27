@@ -30,6 +30,9 @@
 #include "core/device.h"
 #include "core/weight.h"
 #include "ops/op_tester.h"
+#include "ops/linear/nvfp4/nvfp4_a4_plan.h"
+#include "ops/linear/nvfp4/nvfp4_geometry.h"
+#include "ops/linear_swiglu/nvfp4/nvfp4_linear_swiglu_plan.h"
 #include "ops/quantized_weight.h"
 #include "ops/split_test_support.h"
 
@@ -269,13 +272,27 @@ int run_case(const Case& test_case, const ExecutionContext& ec) {
             set_device(ec, 0);
             GuardedDeviceBuffer reference(parent_elements * sizeof(std::uint16_t));
             reference.fill(0xff);
+            // The [17408,5120] half leaves A16 at a lower width than the whole weight; there the
+            // reference runs the whole weight's fused A4 launcher (split_test_support.h).
+            const bool whole_a4 = nvfp4_half_route_diverges(
+                test_case.qtype, policy, tokens, ops::detail::kNvfp4GateUpHalfFirstA4Tokens,
+                ops::detail::kNvfp4GateUpFirstA4Tokens);
             DeviceArena reference_arena(
-                swiglu_workspace_bytes(test_case.qtype, kGateUpRows, policy, tokens));
+                whole_a4 ? std::max<std::size_t>(
+                               ops::detail::nvfp4_a4_workspace_capacity_bytes(tokens, kInputRows),
+                               1)
+                         : swiglu_workspace_bytes(test_case.qtype, kGateUpRows, policy, tokens));
             const Tensor reference_x(parent_x.p, DType::BF16, {kInputRows, tokens});
             Tensor reference_out(reference.data(), DType::BF16, {kIntermediate, tokens});
             cuda_check(cudaDeviceSynchronize(), "cudaDeviceSynchronize");
-            ops::linear_swiglu(reference_x, weights->parent.weight, reference_out, policy,
-                               reference_arena, ec.dev[0]->stream);
+            if (whole_a4) {
+                ops::detail::nvfp4_linear_swiglu_a4_launch(reference_x, weights->parent.weight,
+                                                           reference_out, reference_arena,
+                                                           ec.dev[0]->stream);
+            } else {
+                ops::linear_swiglu(reference_x, weights->parent.weight, reference_out, policy,
+                                   reference_arena, ec.dev[0]->stream);
+            }
             cuda_check(cudaStreamSynchronize(ec.dev[0]->stream), "cudaStreamSynchronize");
             failures += reference.verify_guards(label + " reference");
             const std::vector<double> expected =
@@ -619,12 +636,13 @@ int main() {
         constexpr auto kA16 = ops::LinearPolicy::A16Only;
         constexpr auto kA8  = ops::LinearPolicy::AllowA8;
         constexpr auto kA4  = ops::LinearPolicy::AllowA4;
-        // Token counts reach every route the half inherits: NVFP4 decode, small-T (SIMT at T=2,
-        // sliced-K beyond), fused A4 MMA (5..255) and the fused A4 TMA route from 256, including a
-        // partial tile (300); FP8 decode, small-T, the A16 sliced-K and MMA matrix routes, and A8.
+        // Token counts reach every route the half runs: NVFP4 decode, small-T (SIMT at T=2,
+        // sliced-K beyond), fused A4 MMA (from kNvfp4GateUpHalfFirstA4Tokens = 3, where the whole
+        // weight still runs A16 through T=4, to 255) and the fused A4 TMA route from 256, including
+        // a partial tile (300); FP8 decode, small-T, A16 sliced-K and MMA matrix routes, and A8.
         const std::vector<Case> cases{
             {"nvfp4 gate_up", QType::NVFP4, 31U, {1, 2, 4, 5, 16}, {kA16}},
-            {"nvfp4 gate_up", QType::NVFP4, 32U, {1, 4, 5, 16, 128, 129, 300, 1024}, {kA4}},
+            {"nvfp4 gate_up", QType::NVFP4, 32U, {1, 2, 3, 4, 5, 16, 128, 129, 300, 1024}, {kA4}},
             {"fp8 gate_up",
              QType::FP8_E4M3FN_ROW_BF16,
              33U,

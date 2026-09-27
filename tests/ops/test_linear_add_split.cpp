@@ -24,7 +24,9 @@
 
 #include "core/device.h"
 #include "core/weight.h"
+#include "ops/linear/nvfp4/nvfp4_a4_plan.h"
 #include "ops/linear/nvfp4/nvfp4_geometry.h"
+#include "ops/linear_add/nvfp4/nvfp4_linear_add_plan.h"
 #include "ops/op_tester.h"
 #include "ops/quantized_weight.h"
 #include "ops/split_test_support.h"
@@ -102,6 +104,16 @@ ReductionCriterion criterion_for(const Case& test_case, ops::LinearPolicy policy
     return kSplitCriterion;
 }
 
+// Whether the MLP down halves take A4 at `tokens` while linear_add() over the whole weight still
+// takes A16 (split_test_support.h); the reference then runs the whole weight's A4 launcher. The
+// output halves share their parent's floor, so they never diverge.
+bool a4_reference(const Case& test_case, ops::LinearPolicy policy, std::int32_t tokens) {
+    return test_case.k == 17408 &&
+           nvfp4_half_route_diverges(test_case.qtype, policy, tokens,
+                                     ops::detail::kNvfp4DownHalfFirstA4Tokens,
+                                     ops::detail::kNvfp4DownFamilyFirstA4Tokens);
+}
+
 int run_case(const Case& test_case, const ExecutionContext& ec, const ops::PeerEvents& events) {
     const std::int32_t n   = test_case.n;
     const std::int32_t k   = test_case.k;
@@ -170,15 +182,25 @@ int run_case(const Case& test_case, const ExecutionContext& ec, const ops::PeerE
             set_device(ec, 0);
             GuardedDeviceBuffer reference(bytes);
             reference.copy_from_host(residual_bits.data(), bytes);
-            DeviceArena reference_arena(
-                std::max<std::size_t>(ops::linear_add_workspace_capacity_bytes(
-                                          test_case.qtype, n, k, policy, tokens, tokens),
-                                      1));
+            const bool whole_a4 = a4_reference(test_case, policy, tokens);
+            DeviceArena reference_arena(std::max<std::size_t>(
+                whole_a4 ? ops::detail::nvfp4_a4_workspace_capacity_bytes(tokens, k)
+                         : ops::linear_add_workspace_capacity_bytes(test_case.qtype, n, k, policy,
+                                                                    tokens, tokens),
+                1));
             const Tensor reference_x(parent_x.p, DType::BF16, {k, tokens});
             Tensor reference_residual(reference.data(), DType::BF16, {n, tokens});
             cuda_check(cudaDeviceSynchronize(), "cudaDeviceSynchronize");
-            ops::linear_add(reference_x, parent_device.weight, reference_residual, policy,
-                            reference_arena, ec.dev[0]->stream);
+            if (whole_a4) {
+                const auto scratch =
+                    ops::detail::allocate_nvfp4_a4_workspace(reference_arena, tokens, k);
+                ops::detail::nvfp4_linear_add_a4_launch(reference_x, parent_device.weight,
+                                                        reference_residual, scratch,
+                                                        ec.dev[0]->stream);
+            } else {
+                ops::linear_add(reference_x, parent_device.weight, reference_residual, policy,
+                                reference_arena, ec.dev[0]->stream);
+            }
             cuda_check(cudaStreamSynchronize(ec.dev[0]->stream), "cudaStreamSynchronize");
             failures += reference.verify_guards(label + " reference");
             const std::vector<double> expected = from_device_bf16(reference.data(), elements);
@@ -400,18 +422,20 @@ int main() {
         constexpr auto kA8  = ops::LinearPolicy::AllowA8;
         constexpr auto kA4  = ops::LinearPolicy::AllowA4;
         // Token counts reach each half's decode, SIMT, A8/A4 crossover and MMA routes, the A4
-        // schedule seams, and (at 1024) the whole problem's TMA route. The NVFP4 A4 floors come
-        // from the constants the linear_add plan and each half's linear() read, so the cases
-        // straddle the crossover wherever it sits.
-        constexpr std::int32_t kDownA4   = ops::detail::kNvfp4DownFamilyFirstA4Tokens;
-        constexpr std::int32_t kOutputA4 = ops::detail::kNvfp4OutputFamilyFirstA4Tokens;
+        // schedule seams, and (at 1024) the whole problem's TMA route.
+        // The NVFP4 A4 floors come from the constants the linear_add plan and each half's linear()
+        // read, so the cases straddle every crossover wherever it sits; between the down halves'
+        // floor and the parent's the reference runs the whole weight's A4 launcher (a4_reference).
+        constexpr std::int32_t kDownA4     = ops::detail::kNvfp4DownFamilyFirstA4Tokens;
+        constexpr std::int32_t kOutputA4   = ops::detail::kNvfp4OutputFamilyFirstA4Tokens;
+        constexpr std::int32_t kDownHalfA4 = ops::detail::kNvfp4DownHalfFirstA4Tokens;
         const std::vector<Case> cases{
             {"nvfp4 mlp down",
              QType::NVFP4,
              5120,
              17408,
              31U,
-             {1, 5, kDownA4 - 1, kDownA4, 48, 128, 384, 512, 1024},
+             {1, kDownHalfA4 - 1, kDownHalfA4, 4, 5, kDownA4 - 1, kDownA4, 48, 128, 384, 512, 1024},
              {kA16, kA4}},
             {"nvfp4 output",
              QType::NVFP4,

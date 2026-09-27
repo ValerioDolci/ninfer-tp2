@@ -24,6 +24,19 @@ namespace ninfer::test {
 // maximum x is one to two ulp of x.
 constexpr double kBf16UnitRoundoff = 1.0 / 256.0;
 
+// The NVFP4 two-device halves leave A16 for A4 at a lower width than the problem they halve
+// (nvfp4_geometry.h: kNvfp4*HalfFirstA4Tokens). Between the two floors the split runs A4 while
+// the whole weight's public route is still A16, so the suites build the single-device reference
+// through the whole weight's A4 launcher instead: parity keeps the split bound, and the A4
+// accuracy itself is qualified against the FP64 oracle by the per-format suites.
+//
+// Whether an NVFP4 split at `tokens` runs A4 on its halves while the whole weight runs A16.
+inline bool nvfp4_half_route_diverges(QType qtype, ops::LinearPolicy policy, std::int32_t tokens,
+                                      std::int32_t half_first_a4, std::int32_t parent_first_a4) {
+    return qtype == QType::NVFP4 && policy == ops::LinearPolicy::AllowA4 &&
+           tokens >= half_first_a4 && tokens < parent_first_a4;
+}
+
 inline const char* policy_name(ops::LinearPolicy policy) {
     switch (policy) {
     case ops::LinearPolicy::A16Only:

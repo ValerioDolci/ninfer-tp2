@@ -3,11 +3,12 @@
 #include "ops/linear/nvfp4/nvfp4_instances.cuh"
 
 namespace ninfer::ops::detail {
-// Two-device input-column half of [5120,17408]. It inherits the parent's measured schedules and
-// route thresholds (n5120_k17408.cu); they have not been re-measured at this shape. Its A4 floor is
-// the MLP down family's constant, which the fused residual projection (nvfp4_linear_add_plan.cpp)
-// reads too: at tp 2 rank 1 runs this linear() and rank 0 runs linear_add over the other half of
-// the same row-parallel projection, so both ranks take the same activation route at every width.
+// Two-device input-column half of [5120,17408]. It inherits the parent's measured schedules
+// and TMA threshold (n5120_k17408.cu); its A4 floor was re-measured on RTX 5070 Ti
+// (kNvfp4DownHalfFirstA4Tokens in nvfp4_geometry.h). The fused residual projection
+// (nvfp4_linear_add_plan.cpp) reads the same constant:
+// at tp 2 rank 1 runs this linear() and rank 0 runs linear_add over the other half of the same
+// row-parallel projection, so both ranks take the same activation route at every width.
 // 8704 = 17 * 512 = 34 * 256 = 68 K128 tiles, so every parent instance keeps whole K tiles.
 namespace {
 using Geometry = Nvfp4Geometry<5120, 8704>;
@@ -59,7 +60,7 @@ Nvfp4A4Route select_a4(std::int32_t tokens) {
 }
 
 bool uses_a4(std::int32_t, std::int32_t max_tokens) {
-    return max_tokens >= kNvfp4DownFamilyFirstA4Tokens;
+    return max_tokens >= kNvfp4DownHalfFirstA4Tokens;
 }
 } // namespace
 

@@ -27,6 +27,9 @@
 #include "core/device.h"
 #include "core/weight.h"
 #include "ops/direct_bf16_weight.h"
+#include "ops/linear/nvfp4/nvfp4_a4_plan.h"
+#include "ops/linear/nvfp4/nvfp4_geometry.h"
+#include "ops/linear/nvfp4/nvfp4_shapes.h"
 #include "ops/op_tester.h"
 #include "ops/quantized_weight.h"
 #include "ops/split_test_support.h"
@@ -152,6 +155,20 @@ ReductionCriterion criterion_for(const Case& test_case, ops::LinearPolicy policy
     return kSplitCriterion;
 }
 
+// The whole NVFP4 weight whose A4 launcher builds the reference where the MLP down input-column
+// halves [5120,8704] take A4 and linear() over the whole weight still takes A16
+// (split_test_support.h); null elsewhere. The output halves [5120,3072] share their parent's floor.
+const ops::detail::Nvfp4LinearShape* a4_reference(const Case& test_case, ops::LinearPolicy policy,
+                                                  std::int32_t tokens) {
+    if (test_case.axis != SplitAxis::Row || test_case.k != 17408 ||
+        !nvfp4_half_route_diverges(test_case.qtype, policy, tokens,
+                                   ops::detail::kNvfp4DownHalfFirstA4Tokens,
+                                   ops::detail::kNvfp4DownFamilyFirstA4Tokens)) {
+        return nullptr;
+    }
+    return &ops::detail::kNvfp4N5120K17408;
+}
+
 int run_case(const Case& test_case, const ExecutionContext& ec, const ops::PeerEvents& events) {
     const bool column      = test_case.axis == SplitAxis::Column;
     const bool dense       = test_case.qtype == QType::BF16;
@@ -227,12 +244,23 @@ int run_case(const Case& test_case, const ExecutionContext& ec, const ops::PeerE
             set_device(ec, 0);
             GuardedDeviceBuffer reference(parent_elements * sizeof(std::uint16_t));
             reference.fill(0xff);
-            DeviceArena reference_arena(workspace_bytes(test_case.qtype, n, k, policy, tokens));
+            const ops::detail::Nvfp4LinearShape* whole_a4 = a4_reference(test_case, policy, tokens);
+            DeviceArena reference_arena(
+                whole_a4 != nullptr
+                    ? std::max<std::size_t>(
+                          ops::detail::nvfp4_a4_workspace_capacity_bytes(tokens, k), 1)
+                    : workspace_bytes(test_case.qtype, n, k, policy, tokens));
             const Tensor reference_x(parent_x.p, DType::BF16, {k, tokens});
             Tensor reference_out(reference.data(), DType::BF16, {n, tokens});
             cuda_check(cudaDeviceSynchronize(), "cudaDeviceSynchronize");
-            ops::linear(reference_x, parent.weight, reference_out, policy, reference_arena,
-                        ec.dev[0]->stream);
+            if (whole_a4 != nullptr) {
+                const auto scratch =
+                    ops::detail::allocate_nvfp4_a4_workspace(reference_arena, tokens, k);
+                whole_a4->a4(reference_x, parent.weight, reference_out, scratch, ec.dev[0]->stream);
+            } else {
+                ops::linear(reference_x, parent.weight, reference_out, policy, reference_arena,
+                            ec.dev[0]->stream);
+            }
             cuda_check(cudaStreamSynchronize(ec.dev[0]->stream), "cudaStreamSynchronize");
             failures += reference.verify_guards(label + " reference");
             const std::vector<double> expected =
@@ -536,7 +564,7 @@ int main() {
              5120,
              17408,
              23U,
-             {1, 8, 48, 128, 512, 1024},
+             {1, 2, 3, 4, 8, 48, 128, 512, 1024},
              {kA16, kA4}},
             // The half takes A4 from linear_add's [5120,6144] crossover, which linear() over the
             // whole weight now shares (17), so T=16 and T=17 compare one route on both sides.

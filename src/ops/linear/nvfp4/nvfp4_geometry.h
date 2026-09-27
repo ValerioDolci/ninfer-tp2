@@ -40,12 +40,30 @@ using Nvfp4N7168K5120 = Nvfp4Geometry<7168, 5120>;
 using Nvfp4N8192K5120 = Nvfp4Geometry<8192, 5120>;
 
 // First token count at which nvfp4 linear_add over the attention output ([5120,6144] and its
-// two-device half [5120,3072]) and over the MLP down projection ([5120,17408] and [5120,8704])
-// takes the A4 route (nvfp4_linear_add_plan.cpp: 17 and 8 since upstream fc3993d8, 7 and 8
-// before). linear() over each half uses the same crossover, so rank 0's linear_add and rank 1's
-// linear() in one row-parallel pair always take the same route.
+// two-device half [5120,3072]) and over the MLP down projection [5120,17408] takes the A4 route
+// (nvfp4_linear_add_plan.cpp: 17 and 8 since upstream fc3993d8, 7 and 8 before). linear() over
+// each of these problems uses the same crossover, so rank 0's linear_add and rank 1's linear() in
+// the output pair always take the same route.
 inline constexpr std::int32_t kNvfp4OutputFamilyFirstA4Tokens = 17;
 inline constexpr std::int32_t kNvfp4DownFamilyFirstA4Tokens   = 8;
+
+// The same crossover for the MLP down two-device half [5120,8704], read by linear_add on rank 0
+// and by linear() on rank 1, so both ranks of the row-parallel pair take the same route.
+// Re-measured on RTX 5070 Ti (70 SMs; CUDA Graph, cold weights): from T=3 the A4 route beats the
+// A16 SIMT and sliced-K routes the half inherited, on both ranks. T=4: 47.0 -> 42.9 us
+// (linear_add), 50.3 -> 42.5 us (linear). At T=1 and T=2 the A16 routes are as fast or faster
+// and stay. The half keeps its parent's A4 TMA floor (T=1024).
+//
+// The output half [5120,3072] keeps the parent's 17. A4 from T=3 there saves only 0.6 us per layer
+// at T=4 (18.8 -> 18.2 us), while moving it together with this floor and the gate/up one below
+// took GSM8K 500 from 0.974 to 0.962 (MTP3 verification runs at T=4), so it is not moved.
+inline constexpr std::int32_t kNvfp4DownHalfFirstA4Tokens = 3;
+
+// First token count at which fused NVFP4 linear_swiglu leaves the A16 small-T route for A4: 5 for
+// the [34816,5120] parent (upstream), 3 for its two-device half [17408,5120], where A4 is faster
+// on RTX 5070 Ti at T=3 and T=4 (T=4: 85.1 -> 78.6 us) and level at T=2.
+inline constexpr std::int32_t kNvfp4GateUpFirstA4Tokens     = 5;
+inline constexpr std::int32_t kNvfp4GateUpHalfFirstA4Tokens = 3;
 
 using Nvfp4Activation3072Geometry  = Nvfp4ActivationGeometry<3072>;
 using Nvfp4Activation5120Geometry  = Nvfp4ActivationGeometry<5120>;

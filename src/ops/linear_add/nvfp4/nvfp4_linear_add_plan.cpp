@@ -15,9 +15,10 @@ enum class Nvfp4LinearAddRoute : std::uint8_t {
     A4,
 };
 
-// The two-device input-column halves [5120,3072] and [5120,8704] keep the crossover of the problem
-// they halve, and linear() over each half uses the same one (shapes/n5120_k3072.cu and
-// n5120_k8704.cu), so both ranks of a row-parallel projection take the same route.
+// The two-device input-column half [5120,3072] keeps the crossover of the problem it halves; the
+// MLP down half [5120,8704] has its own, measured on RTX 5070 Ti (nvfp4_geometry.h). linear() over
+// each half uses the same one (shapes/n5120_k3072.cu and n5120_k8704.cu), so both ranks of a
+// row-parallel projection take the same route.
 Nvfp4LinearAddRoute resolve_route(std::int32_t output_rows, std::int32_t input_rows,
                                   LinearPolicy policy, std::int32_t tokens) {
     const bool output_family =
@@ -33,7 +34,9 @@ Nvfp4LinearAddRoute resolve_route(std::int32_t output_rows, std::int32_t input_r
     }
     if (!allows_a4(policy)) { throw std::invalid_argument("nvfp4 linear_add: unsupported policy"); }
     const std::int32_t first_a4 =
-        output_family ? kNvfp4OutputFamilyFirstA4Tokens : kNvfp4DownFamilyFirstA4Tokens;
+        output_family ? kNvfp4OutputFamilyFirstA4Tokens
+                      : (input_rows == Nvfp4N5120K8704::kInputRows ? kNvfp4DownHalfFirstA4Tokens
+                                                                   : kNvfp4DownFamilyFirstA4Tokens);
     return tokens >= first_a4 ? Nvfp4LinearAddRoute::A4 : Nvfp4LinearAddRoute::A16;
 }
 

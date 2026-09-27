@@ -90,10 +90,12 @@ int verify_preserved(const GuardedDeviceBuffer& device, std::span<const std::uin
 }
 
 int run_shape(std::int32_t n, std::int32_t k, std::uint32_t seed) {
-    // Each two-device half reads the A4 floor of the problem it halves from the same constant.
+    // Each problem reads its A4 floor from the constant the plan reads; the output half shares its
+    // parent's, the MLP down half has its own (re-measured on RTX 5070 Ti).
     const std::int32_t first_a4 = k == 6144 || k == 3072
                                       ? ops::detail::kNvfp4OutputFamilyFirstA4Tokens
-                                      : ops::detail::kNvfp4DownFamilyFirstA4Tokens;
+                                  : k == 17408 ? ops::detail::kNvfp4DownFamilyFirstA4Tokens
+                                               : ops::detail::kNvfp4DownHalfFirstA4Tokens;
     const std::array invocations{
         Invocation{1, ops::LinearPolicy::A16Only},
         Invocation{4, ops::LinearPolicy::A16Only},
@@ -112,7 +114,9 @@ int run_shape(std::int32_t n, std::int32_t k, std::uint32_t seed) {
         Invocation{128, ops::LinearPolicy::A16Only},
         Invocation{129, ops::LinearPolicy::A16Only},
         Invocation{1024, ops::LinearPolicy::A16Only},
+        Invocation{first_a4 - 1, ops::LinearPolicy::AllowA4},
         Invocation{first_a4, ops::LinearPolicy::AllowA4},
+        Invocation{4, ops::LinearPolicy::AllowA4},
         Invocation{17, ops::LinearPolicy::AllowA4},
         Invocation{8, ops::LinearPolicy::AllowA4},
         Invocation{16, ops::LinearPolicy::AllowA4},
