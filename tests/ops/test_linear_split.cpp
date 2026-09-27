@@ -27,6 +27,7 @@
 #include "core/device.h"
 #include "core/weight.h"
 #include "ops/direct_bf16_weight.h"
+#include "ops/linear/nvfp4/nvfp4_geometry.h"
 #include "ops/op_tester.h"
 #include "ops/quantized_weight.h"
 #include "ops/split_test_support.h"
@@ -144,10 +145,24 @@ constexpr ReductionCriterion kSplitCriterion{2.0 * kBf16UnitRoundoff, 0.0, 2.0 *
 // The FP8 A8 Linear tolerance: a row split changes each rank's per-token activation scale.
 constexpr ReductionCriterion kFp8A8RowSplitCriterion{0.04, kBf16UnitRoundoff, 0.06};
 
-ReductionCriterion criterion_for(const Case& test_case, ops::LinearPolicy policy) {
+ReductionCriterion criterion_for(const Case& test_case, ops::LinearPolicy policy,
+                                 std::int32_t tokens) {
     if (test_case.qtype == QType::FP8_E4M3FN_ROW_BF16 && test_case.axis == SplitAxis::Row &&
         ops::allows_a8(policy)) {
         return kFp8A8RowSplitCriterion;
+    }
+    // The NVFP4 input-column halves [5120,8704] and [5120,3072] take A4 from a lower width than
+    // the whole weight (nvfp4_geometry.h).
+    if (test_case.axis == SplitAxis::Row && (test_case.k == 17408 || test_case.k == 6144)) {
+        const bool down = test_case.k == 17408;
+        if (nvfp4_half_route_diverges(
+                test_case.qtype, policy, tokens,
+                down ? ops::detail::kNvfp4DownHalfFirstA4Tokens
+                     : ops::detail::kNvfp4OutputHalfFirstA4Tokens,
+                down ? ops::detail::kNvfp4DownFamilyFirstA4Tokens
+                     : ops::detail::kNvfp4OutputFamilyFirstA4Tokens)) {
+            return kNvfp4A4AgainstA16Criterion;
+        }
     }
     return kSplitCriterion;
 }
@@ -268,7 +283,7 @@ int run_case(const Case& test_case, const ExecutionContext& ec, const ops::PeerE
             }
             synchronize_both(ec);
 
-            const ReductionCriterion criterion = criterion_for(test_case, policy);
+            const ReductionCriterion criterion = criterion_for(test_case, policy, tokens);
             std::array<std::vector<double>, 2> observed;
             for (std::size_t rank = 0; rank < 2; ++rank) {
                 const std::string rank_label = label + " rank " + std::to_string(rank);
@@ -536,17 +551,17 @@ int main() {
              5120,
              17408,
              23U,
-             {1, 8, 48, 128, 512, 1024},
+             {1, 2, 3, 4, 8, 48, 128, 511, 512, 1024},
              {kA16, kA4}},
-            // The half takes A4 from linear_add's [5120,6144] crossover, which linear() over the
-            // whole weight now shares (17), so T=16 and T=17 compare one route on both sides.
+            // The half takes A4 from T=3 (kNvfp4OutputHalfFirstA4Tokens) and the whole weight from
+            // T=17, so T=3..16 compare A4 with A16 and T=17 one route on both sides.
             {"nvfp4 output",
              QType::NVFP4,
              SplitAxis::Row,
              5120,
              6144,
              25U,
-             {1, 8, 16, 17, 48, 128, 512, 1024},
+             {1, 2, 3, 8, 16, 17, 48, 128, 511, 512, 1024},
              {kA16, kA4}},
             {"bf16 output", QType::BF16, SplitAxis::Row, 5120, 6144, 24U, {1, 8, 48}, {kA16}},
         };

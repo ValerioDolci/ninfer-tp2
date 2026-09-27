@@ -95,9 +95,19 @@ constexpr ReductionCriterion kSplitCriterion{2.0 * kBf16UnitRoundoff, 0.0, 2.0 *
 // The FP8 A8 Linear tolerance: a row split changes each rank's per-token activation scale.
 constexpr ReductionCriterion kFp8A8RowSplitCriterion{0.04, kBf16UnitRoundoff, 0.06};
 
-ReductionCriterion criterion_for(const Case& test_case, ops::LinearPolicy policy) {
+ReductionCriterion criterion_for(const Case& test_case, ops::LinearPolicy policy,
+                                 std::int32_t tokens) {
     if (test_case.qtype == QType::FP8_E4M3FN_ROW_BF16 && ops::allows_a8(policy)) {
         return kFp8A8RowSplitCriterion;
+    }
+    const bool down = test_case.k == 17408;
+    if (nvfp4_half_route_diverges(
+            test_case.qtype, policy, tokens,
+            down ? ops::detail::kNvfp4DownHalfFirstA4Tokens
+                 : ops::detail::kNvfp4OutputHalfFirstA4Tokens,
+            down ? ops::detail::kNvfp4DownFamilyFirstA4Tokens
+                 : ops::detail::kNvfp4OutputFamilyFirstA4Tokens)) {
+        return kNvfp4A4AgainstA16Criterion;
     }
     return kSplitCriterion;
 }
@@ -213,7 +223,7 @@ int run_case(const Case& test_case, const ExecutionContext& ec, const ops::PeerE
                                          events);
             synchronize_both(ec);
 
-            const ReductionCriterion criterion = criterion_for(test_case, policy);
+            const ReductionCriterion criterion = criterion_for(test_case, policy, tokens);
             std::array<std::vector<double>, 2> observed;
             for (std::size_t rank = 0; rank < 2; ++rank) {
                 const std::string rank_label = label + " rank " + std::to_string(rank);
@@ -400,25 +410,30 @@ int main() {
         constexpr auto kA8  = ops::LinearPolicy::AllowA8;
         constexpr auto kA4  = ops::LinearPolicy::AllowA4;
         // Token counts reach each half's decode, SIMT, A8/A4 crossover and MMA routes, the A4
-        // schedule seams, and (at 1024) the whole problem's TMA route. The NVFP4 A4 floors come
-        // from the constants the linear_add plan and each half's linear() read, so the cases
-        // straddle the crossover wherever it sits.
-        constexpr std::int32_t kDownA4   = ops::detail::kNvfp4DownFamilyFirstA4Tokens;
-        constexpr std::int32_t kOutputA4 = ops::detail::kNvfp4OutputFamilyFirstA4Tokens;
+        // schedule seams, and the TMA routes (the halves' from 512, the whole problem's at 1024).
+        // The NVFP4 A4 floors come from the constants the linear_add plan and each half's linear()
+        // read, so the cases straddle both crossovers wherever they sit; between the halves' floor
+        // and the parent's the reference runs A16 (kNvfp4A4AgainstA16Criterion).
+        constexpr std::int32_t kDownA4       = ops::detail::kNvfp4DownFamilyFirstA4Tokens;
+        constexpr std::int32_t kOutputA4     = ops::detail::kNvfp4OutputFamilyFirstA4Tokens;
+        constexpr std::int32_t kDownHalfA4   = ops::detail::kNvfp4DownHalfFirstA4Tokens;
+        constexpr std::int32_t kOutputHalfA4 = ops::detail::kNvfp4OutputHalfFirstA4Tokens;
         const std::vector<Case> cases{
             {"nvfp4 mlp down",
              QType::NVFP4,
              5120,
              17408,
              31U,
-             {1, 5, kDownA4 - 1, kDownA4, 48, 128, 384, 512, 1024},
+             {1, kDownHalfA4 - 1, kDownHalfA4, 4, 5, kDownA4 - 1, kDownA4, 48, 128, 384, 511,
+              512, 1024},
              {kA16, kA4}},
             {"nvfp4 output",
              QType::NVFP4,
              5120,
              6144,
              34U,
-             {1, 2, 8, kOutputA4 - 1, kOutputA4, 32, 48, 128, 384, 512, 1024},
+             {1, kOutputHalfA4 - 1, kOutputHalfA4, 4, 8, kOutputA4 - 1, kOutputA4, 32, 48, 128, 384,
+              511, 512, 1024},
              {kA16, kA4}},
             {"fp8 output",
              QType::FP8_E4M3FN_ROW_BF16,

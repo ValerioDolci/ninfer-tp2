@@ -20,9 +20,14 @@ using M128N128Resident  = Nvfp4A4MmaSchedule<128, 128, 256, 4, 2, 1, 2>;
 
 // This projection selects its own route, so the layout the quantizer writes below must be derived
 // from the same predicate; the two are read together at the call site for that reason. The
-// two-device halves [5120,8704] and [5120,3072] take the TMA route at the same width as linear()
-// over the same shard, so the two ranks of a row-parallel projection run the same schedule.
-constexpr bool uses_tma(std::int32_t tokens) { return tokens >= 1024; }
+// two-device halves [5120,8704] and [5120,3072] take the TMA route from
+// kNvfp4ResidualHalfFirstTmaTokens, the width linear() over the same shard reads, so the two ranks
+// of a row-parallel projection run the same schedule.
+constexpr bool uses_tma(std::int32_t input_rows, std::int32_t tokens) {
+    const bool half = input_rows == Nvfp4N5120K8704::kInputRows ||
+                      input_rows == Nvfp4N5120K3072::kInputRows;
+    return tokens >= (half ? kNvfp4ResidualHalfFirstTmaTokens : 1024);
+}
 
 template <class Geometry, class Schedule>
 void launch_gemm(const Weight& weight, Tensor& residual, Nvfp4A4Workspace workspace,
@@ -56,9 +61,10 @@ void launch_problem(const Weight& weight, Tensor& residual, Nvfp4A4Workspace wor
 void nvfp4_linear_add_a4_launch(const Tensor& x, const Weight& weight, Tensor& residual,
                                 Nvfp4A4Workspace workspace, cudaStream_t stream) {
     const std::int32_t tokens = x.ne[1];
-    const auto layout = uses_tma(tokens) ? Nvfp4ScaleLayout::Tiled256 : Nvfp4ScaleLayout::RowMajor;
+    const bool tma    = uses_tma(weight.k, tokens);
+    const auto layout = tma ? Nvfp4ScaleLayout::Tiled256 : Nvfp4ScaleLayout::RowMajor;
     launch_nvfp4_a4_quantize(x, weight, workspace, layout, stream);
-    if (uses_tma(tokens)) {
+    if (tma) {
         launch_nvfp4_a4_tma_linear_add(nvfp4_a4_operands(weight, workspace, tokens, layout),
                                        static_cast<__nv_bfloat16*>(residual.data), stream);
         return;
@@ -70,7 +76,8 @@ void nvfp4_linear_add_a4_launch(const Tensor& x, const Weight& weight, Tensor& r
     case Nvfp4GeometryId::N5120K17408:
         launch_problem<Nvfp4N5120K17408>(weight, residual, workspace, tokens, stream);
         return;
-    // The two-device halves inherit the MMA bands of the problem they halve (not re-measured).
+    // The two-device halves inherit the MMA bands of the problem they halve (not re-measured); they
+    // leave them for TMA from T=512 (above).
     case Nvfp4GeometryId::N5120K8704:
         launch_problem<Nvfp4N5120K8704>(weight, residual, workspace, tokens, stream);
         return;

@@ -13,9 +13,11 @@
 namespace ninfer::ops::detail {
 
 // The gate/up problems are [34816,5120] and its two-device output-row half [17408,5120]. They share
-// the input width, so the workspace does not depend on which one runs; the launchers below take the
-// problem from the weight's shape.
-[[nodiscard]] std::size_t nvfp4_linear_swiglu_workspace_capacity_bytes(LinearPolicy policy,
+// the input width, so the A4 workspace has one size, but the half leaves the A16 small-T route at a
+// lower width (kNvfp4GateUpHalfFirstA4Tokens), so the capacity takes the gate/up rows; the launchers
+// below take the problem from the weight's shape.
+[[nodiscard]] std::size_t nvfp4_linear_swiglu_workspace_capacity_bytes(std::int32_t gate_up_rows,
+                                                                       LinearPolicy policy,
                                                                        std::int32_t min_tokens,
                                                                        std::int32_t max_tokens);
 

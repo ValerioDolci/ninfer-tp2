@@ -24,6 +24,15 @@ using M128N128Resident  = Nvfp4A4MmaSchedule<128, 128, 256, 4, 2, 1, 2>;
 // from the same predicate; the two are read together at the call site for that reason.
 constexpr bool uses_tma(std::int32_t tokens) { return tokens >= 512; }
 
+// First width at which the TMA route reads the 256-token scale tiles instead of the 128-token ones.
+// The [7168,5120] two-device shard keeps the 128-token schedule through T=1024: its 56 row tiles
+// give 224 CTAs at 256 tokens per tile, 3.2 waves on a 70-SM RTX 5070 Ti, and 448 at 128. Measured
+// there at the 1024-token prefill chunk: 196.5 -> 183.7 us; from T=1025 the 256-token tile is
+// faster again. The [14336,5120] parent keeps 1024 (upstream).
+std::int32_t first_tiled256_tokens(std::int32_t rows) {
+    return rows == Nvfp4N7168K5120::kOutputRows ? 1025 : 1024;
+}
+
 template <class Problem, class Schedule>
 void launch_gemm(const Weight& weight, Tensor& q, Tensor& gate, Tensor& k, Tensor& v,
                  Nvfp4A4Workspace workspace, std::int32_t tokens, cudaStream_t stream) {
@@ -67,7 +76,8 @@ void nvfp4_attn_input_a4_launch(const Tensor& x, const Weight& weight, Tensor& q
                                 cudaStream_t stream) {
     const std::int32_t tokens = x.ne[1];
     const auto layout =
-        uses_tma(tokens) ? (tokens < 1024 ? Nvfp4ScaleLayout::Tiled128 : Nvfp4ScaleLayout::Tiled256)
+        uses_tma(tokens) ? (tokens < first_tiled256_tokens(weight.n) ? Nvfp4ScaleLayout::Tiled128
+                                                                      : Nvfp4ScaleLayout::Tiled256)
                          : Nvfp4ScaleLayout::RowMajor;
     // Resolve the parent or shard before quantizing, so an unsupported weight enqueues nothing.
     visit_nvfp4_attn_input_problem(weight.n, [&]<class Problem>() {

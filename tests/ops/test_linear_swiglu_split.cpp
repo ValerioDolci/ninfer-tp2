@@ -30,6 +30,7 @@
 #include "core/device.h"
 #include "core/weight.h"
 #include "ops/op_tester.h"
+#include "ops/linear/nvfp4/nvfp4_geometry.h"
 #include "ops/quantized_weight.h"
 #include "ops/split_test_support.h"
 
@@ -318,7 +319,14 @@ int run_case(const Case& test_case, const ExecutionContext& ec) {
                               expected.begin() + static_cast<std::ptrdiff_t>(source + kShardHalf),
                               block.begin() + static_cast<std::ptrdiff_t>(token) * kShardHalf);
                 }
-                failures += compare(rank_label, observed[rank], block, kSplitCriterion);
+                // The [17408,5120] half leaves A16 at a lower width than the whole weight.
+                const ReductionCriterion criterion =
+                    nvfp4_half_route_diverges(test_case.qtype, policy, tokens,
+                                              ops::detail::kNvfp4GateUpHalfFirstA4Tokens,
+                                              ops::detail::kNvfp4GateUpFirstA4Tokens)
+                        ? kNvfp4A4AgainstA16Criterion
+                        : kSplitCriterion;
+                failures += compare(rank_label, observed[rank], block, criterion);
             }
             if (observed[0] == observed[1]) {
                 std::cerr << label << ": both ranks produced the same output block\n";
@@ -619,12 +627,13 @@ int main() {
         constexpr auto kA16 = ops::LinearPolicy::A16Only;
         constexpr auto kA8  = ops::LinearPolicy::AllowA8;
         constexpr auto kA4  = ops::LinearPolicy::AllowA4;
-        // Token counts reach every route the half inherits: NVFP4 decode, small-T (SIMT at T=2,
-        // sliced-K beyond), fused A4 MMA (5..255) and the fused A4 TMA route from 256, including a
-        // partial tile (300); FP8 decode, small-T, the A16 sliced-K and MMA matrix routes, and A8.
+        // Token counts reach every route the half runs: NVFP4 decode, small-T (SIMT at T=2,
+        // sliced-K beyond), fused A4 MMA (from kNvfp4GateUpHalfFirstA4Tokens = 3, where the whole
+        // weight still runs A16 through T=4, to 255) and the fused A4 TMA route from 256, including
+        // a partial tile (300); FP8 decode, small-T, the A16 sliced-K and MMA matrix routes, and A8.
         const std::vector<Case> cases{
             {"nvfp4 gate_up", QType::NVFP4, 31U, {1, 2, 4, 5, 16}, {kA16}},
-            {"nvfp4 gate_up", QType::NVFP4, 32U, {1, 4, 5, 16, 128, 129, 300, 1024}, {kA4}},
+            {"nvfp4 gate_up", QType::NVFP4, 32U, {1, 2, 3, 4, 5, 16, 128, 129, 300, 1024}, {kA4}},
             {"fp8 gate_up",
              QType::FP8_E4M3FN_ROW_BF16,
              33U,

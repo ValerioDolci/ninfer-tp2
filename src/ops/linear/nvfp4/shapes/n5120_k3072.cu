@@ -3,12 +3,12 @@
 #include "ops/linear/nvfp4/nvfp4_instances.cuh"
 
 namespace ninfer::ops::detail {
-// Two-device input-column half of [5120,6144]. It inherits the parent's measured schedules and TMA
-// threshold (n5120_k6144.cu); they have not been re-measured at this shape. Its A4 floor is the
-// attention/GDN output family's constant, which the fused residual projection
-// (nvfp4_linear_add_plan.cpp) reads too: at tp 2 rank 1 runs this linear() and rank 0 runs
-// linear_add over the other half of the same row-parallel projection, so the two ranks take the
-// same activation route at every width, as tp 1's single linear_add [5120,6144] does.
+// Two-device input-column half of [5120,6144]. It inherits the parent's measured schedules
+// (n5120_k6144.cu); its A4 floor and TMA threshold were re-measured on RTX 5070 Ti
+// (kNvfp4OutputHalfFirstA4Tokens, kNvfp4ResidualHalfFirstTmaTokens in nvfp4_geometry.h). The fused
+// residual projection (nvfp4_linear_add_plan.cpp, nvfp4_linear_add_a4.cu) reads the same constants:
+// at tp 2 rank 1 runs this linear() and rank 0 runs linear_add over the other half of the same
+// row-parallel projection, so the two ranks take the same activation route at every width.
 // 3072 = 6 * 512 = 12 * 256, so every parent instance keeps whole K tiles.
 namespace {
 using Geometry = Nvfp4Geometry<5120, 3072>;
@@ -42,7 +42,8 @@ void launch_a16(const Tensor& x, const Weight& w, Tensor& y, cudaStream_t stream
 }
 
 Nvfp4A4Route select_a4(std::int32_t tokens) {
-    if (tokens >= 1024) return nvfp4_a4_tma_route<Nvfp4GeometryId::N5120K3072>();
+    if (tokens >= kNvfp4ResidualHalfFirstTmaTokens)
+        return nvfp4_a4_tma_route<Nvfp4GeometryId::N5120K3072>();
     if (tokens <= 128) return nvfp4_a4_mma_route<Geometry, T32R64>();
     if (tokens <= 192) return nvfp4_a4_mma_route<Geometry, T64R128>();
     if (tokens <= 384) return nvfp4_a4_mma_route<Geometry, T128R128Resident>();
@@ -51,7 +52,7 @@ Nvfp4A4Route select_a4(std::int32_t tokens) {
 }
 
 bool uses_a4(std::int32_t, std::int32_t max_tokens) {
-    return max_tokens >= kNvfp4OutputFamilyFirstA4Tokens;
+    return max_tokens >= kNvfp4OutputHalfFirstA4Tokens;
 }
 } // namespace
 

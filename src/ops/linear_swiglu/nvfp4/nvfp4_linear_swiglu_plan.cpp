@@ -20,7 +20,15 @@ enum class Nvfp4LinearSwiGluRoute {
     TmaFusedA4,
 };
 
-Nvfp4LinearSwiGluRoute resolve_route(LinearPolicy policy, std::int32_t tokens) {
+// The A4 floor of the problem: the [17408,5120] two-device half takes A4 from a lower width than
+// the [34816,5120] parent (nvfp4_geometry.h).
+std::int32_t first_a4_tokens(std::int32_t gate_up_rows) {
+    return gate_up_rows == Nvfp4N17408K5120::kOutputRows ? kNvfp4GateUpHalfFirstA4Tokens
+                                                         : kNvfp4GateUpFirstA4Tokens;
+}
+
+Nvfp4LinearSwiGluRoute resolve_route(LinearPolicy policy, std::int32_t tokens,
+                                     std::int32_t gate_up_rows) {
     if (tokens <= 0) { throw std::invalid_argument("nvfp4 linear_swiglu: T must be positive"); }
     if (!valid_linear_policy(policy)) {
         throw std::invalid_argument("nvfp4 linear_swiglu: invalid compute policy");
@@ -31,7 +39,7 @@ Nvfp4LinearSwiGluRoute resolve_route(LinearPolicy policy, std::int32_t tokens) {
         throw std::invalid_argument("nvfp4 linear_swiglu A16 is registered only through T=16");
     }
     if (tokens == 1) { return Nvfp4LinearSwiGluRoute::DecodeFusedA16; }
-    if (tokens <= 4) { return Nvfp4LinearSwiGluRoute::SmallTFusedA16; }
+    if (tokens < first_a4_tokens(gate_up_rows)) { return Nvfp4LinearSwiGluRoute::SmallTFusedA16; }
     // This route dispatches its own fused kernel rather than a Linear shape's, so it carries its
     // own condition; the call site below forces the matching scale layout.
     if (tokens >= 256) { return Nvfp4LinearSwiGluRoute::TmaFusedA4; }
@@ -51,15 +59,17 @@ std::size_t fused_workspace_bytes(std::int32_t tokens) {
 
 } // namespace
 
-std::size_t nvfp4_linear_swiglu_workspace_capacity_bytes(LinearPolicy policy,
+std::size_t nvfp4_linear_swiglu_workspace_capacity_bytes(std::int32_t gate_up_rows,
+                                                         LinearPolicy policy,
                                                          std::int32_t min_tokens,
                                                          std::int32_t max_tokens) {
     if (min_tokens <= 0 || max_tokens < min_tokens) {
         throw std::invalid_argument("nvfp4 linear_swiglu workspace: invalid token interval");
     }
-    (void)resolve_route(policy, min_tokens);
-    (void)resolve_route(policy, max_tokens);
-    if ((policy == LinearPolicy::A16Only || policy == LinearPolicy::AllowA8) || max_tokens <= 4) {
+    (void)resolve_route(policy, min_tokens, gate_up_rows);
+    (void)resolve_route(policy, max_tokens, gate_up_rows);
+    if ((policy == LinearPolicy::A16Only || policy == LinearPolicy::AllowA8) ||
+        max_tokens < first_a4_tokens(gate_up_rows)) {
         return 0;
     }
 
@@ -69,7 +79,7 @@ std::size_t nvfp4_linear_swiglu_workspace_capacity_bytes(LinearPolicy policy,
 void nvfp4_linear_swiglu_dispatch(const Tensor& x, const Weight& weight, Tensor& out,
                                   LinearPolicy policy, WorkspaceArena* workspace,
                                   cudaStream_t stream) {
-    const Nvfp4LinearSwiGluRoute route = resolve_route(policy, x.ne[1]);
+    const Nvfp4LinearSwiGluRoute route = resolve_route(policy, x.ne[1], weight.n);
     if ((route == Nvfp4LinearSwiGluRoute::FusedA4 || route == Nvfp4LinearSwiGluRoute::TmaFusedA4) &&
         workspace == nullptr) {
         throw std::invalid_argument("nvfp4 linear_swiglu: A4 route requires caller workspace");

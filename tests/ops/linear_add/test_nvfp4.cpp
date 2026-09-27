@@ -90,10 +90,12 @@ int verify_preserved(const GuardedDeviceBuffer& device, std::span<const std::uin
 }
 
 int run_shape(std::int32_t n, std::int32_t k, std::uint32_t seed) {
-    // Each two-device half reads the A4 floor of the problem it halves from the same constant.
-    const std::int32_t first_a4 = k == 6144 || k == 3072
-                                      ? ops::detail::kNvfp4OutputFamilyFirstA4Tokens
-                                      : ops::detail::kNvfp4DownFamilyFirstA4Tokens;
+    // Each problem reads its A4 floor from the constant the plan reads; the two-device halves have
+    // their own (re-measured on RTX 5070 Ti).
+    const std::int32_t first_a4 = k == 6144   ? ops::detail::kNvfp4OutputFamilyFirstA4Tokens
+                                  : k == 17408 ? ops::detail::kNvfp4DownFamilyFirstA4Tokens
+                                  : k == 3072  ? ops::detail::kNvfp4OutputHalfFirstA4Tokens
+                                               : ops::detail::kNvfp4DownHalfFirstA4Tokens;
     const std::array invocations{
         Invocation{1, ops::LinearPolicy::A16Only},
         Invocation{4, ops::LinearPolicy::A16Only},
@@ -112,7 +114,9 @@ int run_shape(std::int32_t n, std::int32_t k, std::uint32_t seed) {
         Invocation{128, ops::LinearPolicy::A16Only},
         Invocation{129, ops::LinearPolicy::A16Only},
         Invocation{1024, ops::LinearPolicy::A16Only},
+        Invocation{first_a4 - 1, ops::LinearPolicy::AllowA4},
         Invocation{first_a4, ops::LinearPolicy::AllowA4},
+        Invocation{4, ops::LinearPolicy::AllowA4},
         Invocation{17, ops::LinearPolicy::AllowA4},
         Invocation{8, ops::LinearPolicy::AllowA4},
         Invocation{16, ops::LinearPolicy::AllowA4},
@@ -121,6 +125,11 @@ int run_shape(std::int32_t n, std::int32_t k, std::uint32_t seed) {
         Invocation{96, ops::LinearPolicy::AllowA4},
         Invocation{128, ops::LinearPolicy::AllowA4},
         Invocation{129, ops::LinearPolicy::AllowA4},
+        // The halves' TMA floor (kNvfp4ResidualHalfFirstTmaTokens) and a ragged width above it.
+        Invocation{511, ops::LinearPolicy::AllowA4},
+        Invocation{512, ops::LinearPolicy::AllowA4},
+        Invocation{513, ops::LinearPolicy::AllowA4},
+        Invocation{769, ops::LinearPolicy::AllowA4},
         // 1023, 1024 and 1025 straddle this route's floor. 1024 was the narrowest width it
         // took before; 1025 is the first ragged one it takes now, and its last M tile holds a
         // single real token, which is the emptiest grid this route ever runs.
