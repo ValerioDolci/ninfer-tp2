@@ -1,6 +1,7 @@
 #include "core/weight.h"
 #include "ninfer/ops/attn_input_proj.h"
 
+#include "ops/linear/nvfp4/nvfp4_a4_probe.h"
 #include "ops/attn_input_proj/bf16/bf16_attn_input_plan.h"
 #include "ops/attn_input_proj/fp8/fp8_attn_input_plan.h"
 #include "ops/attn_input_proj/nvfp4/nvfp4_attn_input_plan.h"
@@ -349,6 +350,8 @@ void attn_input_proj_column_parallel(
     std::array<Tensor, 2> gate_out{gate[0], gate[1]};
     std::array<Tensor, 2> k_out{k[0], k[1]};
     std::array<Tensor, 2> v_out{v[0], v[1]};
+    // NINFER_A4_PROBE experiment only (off unless set): statistics of this A4 input.
+    detail::a4probe::input_only(detail::a4probe::Op::AttnIn, x[0], w[0], policy, ec);
     detail::for_each_rank(ec, [&](int rank) {
         const auto slot = static_cast<std::size_t>(rank);
         if (w[slot].qtype == QType::NVFP4) {

@@ -34,7 +34,8 @@ set(ninfer_op_tests
   gdn_projections_split
   gdn_headsplit
   linear_swiglu_split
-  linear_add_split)
+  linear_add_split
+  nvfp4_a4_probe)
 foreach(op IN LISTS ninfer_op_tests)
   ninfer_add_op_test(ninfer_${op}_test
     SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_${op}.cpp"

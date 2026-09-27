@@ -46,6 +46,34 @@ using Nvfp4N8192K5120 = Nvfp4Geometry<8192, 5120>;
 // linear() in one row-parallel pair always take the same route.
 inline constexpr std::int32_t kNvfp4OutputFamilyFirstA4Tokens = 17;
 inline constexpr std::int32_t kNvfp4DownFamilyFirstA4Tokens   = 8;
+// First token count at which fused NVFP4 linear_swiglu over [34816,5120] and its two-device half
+// [17408,5120] leaves the A16 small-T route for A4 (nvfp4_linear_swiglu_plan.cpp).
+inline constexpr std::int32_t kNvfp4GateUpFirstA4Tokens = 5;
+
+// EXPERIMENT KNOB (branch tp2/a4-error-probe, not a product setting). NINFER_TP2_A4_HALF lowers
+// the A16->A4 floor of the three two-device halves above, one by one, so that one binary runs the
+// per-op A4 ablation at tp 2:
+//   swiglu  linear_swiglu over [17408,5120]            (kNvfp4GateUpFirstA4Tokens)
+//   down    linear_add/linear over [5120,8704]         (kNvfp4DownFamilyFirstA4Tokens)
+//   out     linear_add/linear over [5120,3072]         (kNvfp4OutputFamilyFirstA4Tokens)
+// e.g. NINFER_TP2_A4_HALF=swiglu (A4 from T=3) or NINFER_TP2_A4_HALF=swiglu=3,down=4. A floor may
+// only be lowered, to 2 at least. Unset or empty, every half keeps its constant, so routes,
+// workspaces and results are those of the constants; the parents never read it. Both ranks of a
+// row-parallel pair read the same floor. The environment is read once, at the first decision.
+enum class Nvfp4HalfFloor : std::uint8_t { GateUp, Down, Output };
+
+struct Nvfp4HalfFloorOverride {
+    std::int32_t gate_up = 0; // 0: the constant
+    std::int32_t down    = 0;
+    std::int32_t output  = 0;
+};
+
+// Parses a NINFER_TP2_A4_HALF value; throws std::invalid_argument on an unknown name or a floor
+// outside [2, constant].
+Nvfp4HalfFloorOverride parse_nvfp4_half_floor_override(const char* spec);
+
+// The floor of `which`: the override if NINFER_TP2_A4_HALF names it, else its constant.
+std::int32_t nvfp4_half_first_a4_tokens(Nvfp4HalfFloor which);
 
 using Nvfp4Activation3072Geometry  = Nvfp4ActivationGeometry<3072>;
 using Nvfp4Activation5120Geometry  = Nvfp4ActivationGeometry<5120>;

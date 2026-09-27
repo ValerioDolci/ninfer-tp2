@@ -4,6 +4,7 @@
 #include "ops/common/split_launch.h"
 #include "ops/linear/fp8/fp8_format.h"
 #include "ops/linear/fp8/fp8_geometry.h"
+#include "ops/linear/nvfp4/nvfp4_a4_probe.h"
 #include "ops/linear/nvfp4/nvfp4_format.h"
 #include "ops/linear/nvfp4/nvfp4_geometry.h"
 #include "ops/linear_swiglu/fp8/fp8_linear_swiglu_plan.h"
@@ -71,7 +72,8 @@ std::size_t linear_swiglu_workspace_capacity_bytes(QType qtype, std::int32_t gat
             gate_up_rows, gate_up_rows / 2, input_rows, input_rows, min_tokens, max_tokens);
     }
     if (qtype == QType::NVFP4 && fused_gate_up_problem(gate_up_rows, input_rows)) {
-        return detail::nvfp4_linear_swiglu_workspace_capacity_bytes(policy, min_tokens, max_tokens);
+        return detail::nvfp4_linear_swiglu_workspace_capacity_bytes(gate_up_rows, policy,
+                                                                    min_tokens, max_tokens);
     }
     if (qtype == QType::FP8_E4M3FN_ROW_BF16 && fused_gate_up_problem(gate_up_rows, input_rows)) {
         return detail::fp8_linear_swiglu_workspace_capacity_bytes(policy, min_tokens, max_tokens);
@@ -217,11 +219,14 @@ void linear_swiglu_column_parallel(const std::array<Tensor, 2>& x,
             x[rank].ne[1], x[rank].ne[1]);
     }
     detail::require_split_workspace(workspace, required, kOp);
+    // NINFER_A4_PROBE experiment only (off unless set): both activation routes on this input.
+    const bool probed = detail::a4probe::begin_swiglu(x, gate_up_weight, policy, ec);
     detail::for_each_rank(ec, [&](int rank) {
         const auto slot = static_cast<std::size_t>(rank);
         dispatch_linear_swiglu(x[slot], gate_up_weight[slot], destination[slot], policy,
                                workspace[slot], ec.dev[slot]->stream);
     });
+    if (probed) { detail::a4probe::finish_swiglu(destination, ec); }
 }
 
 void linear_swiglu_column_parallel(const std::array<Tensor, 2>& x,

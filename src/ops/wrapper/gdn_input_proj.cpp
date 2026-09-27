@@ -14,6 +14,7 @@
 #include "ops/gdn_input_proj/q8/q8_gdn_input_plan.h"
 #include "ops/linear/fp8/fp8_geometry.h"
 #include "ops/linear/fp8/fp8_format.h"
+#include "ops/linear/nvfp4/nvfp4_a4_probe.h"
 #include "ops/linear/nvfp4/nvfp4_layout.h"
 #include "ops/linear/nvfp4/nvfp4_format.h"
 
@@ -1320,6 +1321,9 @@ void gdn_input_proj_conv_record_column_parallel(
         require_shard_residency(ec, rank, conv_states[slot], w, query[slot], value[slot],
                                 residency);
     }
+    // NINFER_A4_PROBE experiment only (off unless set): statistics of this A4 input.
+    detail::a4probe::input_only(detail::a4probe::Op::GdnIn, x[0], query_key_value_z_weight[0],
+                                policy, ec);
     detail::for_each_rank(ec, [&](int rank) {
         const auto slot     = static_cast<std::size_t>(rank);
         const Weight& w     = query_key_value_z_weight[slot];

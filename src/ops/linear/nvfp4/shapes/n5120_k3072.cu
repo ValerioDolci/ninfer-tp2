@@ -51,7 +51,8 @@ Nvfp4A4Route select_a4(std::int32_t tokens) {
 }
 
 bool uses_a4(std::int32_t, std::int32_t max_tokens) {
-    return max_tokens >= kNvfp4OutputFamilyFirstA4Tokens;
+    // kNvfp4OutputFamilyFirstA4Tokens unless the NINFER_TP2_A4_HALF experiment lowers it.
+    return max_tokens >= nvfp4_half_first_a4_tokens(Nvfp4HalfFloor::Output);
 }
 } // namespace
 

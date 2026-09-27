@@ -6,6 +6,7 @@
 #include "ops/linear/fp8/fp8_geometry.h"
 #include "ops/linear/fp8/fp8_format.h"
 #include "ops/linear/linear_dispatch.h"
+#include "ops/linear/nvfp4/nvfp4_a4_probe.h"
 #include "ops/linear/nvfp4/nvfp4_layout.h"
 #include "ops/linear/nvfp4/nvfp4_format.h"
 #include "ops/linear_add/fp8/fp8_linear_add_plan.h"
@@ -345,6 +346,8 @@ void linear_add_row_parallel(const std::array<Tensor, 2>& x, const std::array<We
     // overwrites its copy with the residual-free partial. allreduce_sum() then leaves
     // `residual + partial_0 + partial_1` on both ranks. It records its inputs-ready event on each
     // rank's stream after the partial, which orders the peer's read.
+    // NINFER_A4_PROBE experiment only (off unless set): both activation routes on this input.
+    const bool probed = detail::a4probe::begin_residual(x, w, destination, policy, ec);
     detail::for_each_rank(ec, [&](int rank) {
         const auto slot           = static_cast<std::size_t>(rank);
         const cudaStream_t stream = ec.dev[slot]->stream;
@@ -356,6 +359,7 @@ void linear_add_row_parallel(const std::array<Tensor, 2>& x, const std::array<We
                                     stream);
         }
     });
+    if (probed) { detail::a4probe::finish_residual(destination, ec); }
     allreduce_sum(residual, staging, ec, events);
 }
 
