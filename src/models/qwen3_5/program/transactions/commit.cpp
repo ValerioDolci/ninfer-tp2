@@ -679,6 +679,14 @@ AbortResult ProgramImpl::abort(SequenceHandle sequence) noexcept {
         return out;
     }
     SequenceState& state = active_sequence(lane);
+    // Execution rows are per lane, and the lane's next request rewrites its pinned table shadow.
+    // A cancelled prefill can still have table copies queued behind unsynchronized work; if they
+    // read the rewritten shadow, its queued step writes this request's KV into the next request's
+    // pages, shared prefix pages included. Every other path that frees a lane synchronizes first;
+    // so does a cancellation. A failure here resurfaces at the next round's synchronization.
+    try {
+        synchronize_devices();
+    } catch (...) {}
     if (!clear_lane_strict(state, request)) { return out; }
     out.timings     = request.timings;
     out.speculative = std::move(request.speculative_stats);
