@@ -4,9 +4,9 @@
 
 namespace ninfer::ops::detail {
 // Two-device input-column half of [5120,17408]. It inherits the parent's measured schedules
-// (n5120_k17408.cu); its A4 floor and TMA threshold were re-measured on RTX 5070 Ti
-// (kNvfp4DownHalfFirstA4Tokens, kNvfp4ResidualHalfFirstTmaTokens in nvfp4_geometry.h). The fused
-// residual projection (nvfp4_linear_add_plan.cpp, nvfp4_linear_add_a4.cu) reads the same constants:
+// and TMA threshold (n5120_k17408.cu); its A4 floor was re-measured on RTX 5070 Ti
+// (kNvfp4DownHalfFirstA4Tokens in nvfp4_geometry.h). The fused residual projection
+// (nvfp4_linear_add_plan.cpp) reads the same constant:
 // at tp 2 rank 1 runs this linear() and rank 0 runs linear_add over the other half of the same
 // row-parallel projection, so both ranks take the same activation route at every width.
 // 8704 = 17 * 512 = 34 * 256 = 68 K128 tiles, so every parent instance keeps whole K tiles.
@@ -50,8 +50,7 @@ void launch_a16(const Tensor& x, const Weight& w, Tensor& y, cudaStream_t stream
 }
 
 Nvfp4A4Route select_a4(std::int32_t tokens) {
-    if (tokens >= kNvfp4ResidualHalfFirstTmaTokens)
-        return nvfp4_a4_tma_route<Nvfp4GeometryId::N5120K8704>();
+    if (tokens >= 1024) return nvfp4_a4_tma_route<Nvfp4GeometryId::N5120K8704>();
     if (tokens <= 64) return nvfp4_a4_mma_route<Geometry, T32R64>();
     if (tokens <= 128) return nvfp4_a4_mma_route<Geometry, T32R128>();
     if (tokens <= 192) return nvfp4_a4_mma_route<Geometry, T64R128>();

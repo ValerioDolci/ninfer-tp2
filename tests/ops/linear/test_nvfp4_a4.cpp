@@ -54,7 +54,7 @@ int run_nvfp4_a4() {
                           {5120, 8704, 729U, Comparison::Sampled, true, invocations});
     // Two-device half of the attention and GDN output projections, across its A16 floor (A4 from
     // T=3, kNvfp4OutputHalfFirstA4Tokens, as linear_add over the same half; T=2/3 are in the
-    // common list) and its MMA and TMA routes (TMA from T=512, 511/512/513 in the list).
+    // common list) and its MMA and TMA routes.
     failures += run_shape("NVFP4_A4", ActivationCompute::A4, make_nvfp4_weight,
                           {5120, 3072, 731U, Comparison::Sampled, true, invocations});
     return failures;

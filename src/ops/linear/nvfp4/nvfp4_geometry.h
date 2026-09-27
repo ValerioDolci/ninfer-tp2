@@ -53,11 +53,9 @@ inline constexpr std::int32_t kNvfp4DownFamilyFirstA4Tokens   = 8;
 // 18.9 -> 17.9 us. At T=1 and T=2 the A16 routes are as fast or faster and stay.
 inline constexpr std::int32_t kNvfp4OutputHalfFirstA4Tokens = 3;
 inline constexpr std::int32_t kNvfp4DownHalfFirstA4Tokens   = 3;
-// First token count at which linear_add and linear() over those two halves take the A4 TMA route
-// (the parents keep 1024). On 70 SMs the halves' A4 MMA schedules lose to it from T=512: at T=512
-// 193.5 -> 173.7 us and 184.6 -> 164.1 us for [5120,8704], 78.5 -> 73.7 us and 71.6 -> 64.4 us
-// for [5120,3072]; T=1024 is unchanged.
-inline constexpr std::int32_t kNvfp4ResidualHalfFirstTmaTokens = 512;
+// The halves keep their parents' A4 TMA floor (T=1024). Measured on RTX 5070 Ti, TMA from T=512
+// wins at T=512..768 and 897..1023 (up to -27 %) but loses up to 11 % at T=769..896, where its
+// fourth 256-token tile is almost empty, so a single lower floor was not kept.
 
 // First token count at which fused NVFP4 linear_swiglu leaves the A16 small-T route for A4: 5 for
 // the [34816,5120] parent (upstream), 3 for its two-device half [17408,5120], where A4 is faster

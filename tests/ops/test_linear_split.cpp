@@ -551,7 +551,7 @@ int main() {
              5120,
              17408,
              23U,
-             {1, 2, 3, 4, 8, 48, 128, 511, 512, 1024},
+             {1, 2, 3, 4, 8, 48, 128, 512, 1024},
              {kA16, kA4}},
             // The half takes A4 from T=3 (kNvfp4OutputHalfFirstA4Tokens) and the whole weight from
             // T=17, so T=3..16 compare A4 with A16 and T=17 one route on both sides.
@@ -561,7 +561,7 @@ int main() {
              5120,
              6144,
              25U,
-             {1, 2, 3, 8, 16, 17, 48, 128, 511, 512, 1024},
+             {1, 2, 3, 8, 16, 17, 48, 128, 512, 1024},
              {kA16, kA4}},
             {"bf16 output", QType::BF16, SplitAxis::Row, 5120, 6144, 24U, {1, 8, 48}, {kA16}},
         };
