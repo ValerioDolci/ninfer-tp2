@@ -96,6 +96,7 @@ int run_shape(std::int32_t n, std::int32_t k, std::uint32_t seed) {
                                       : ops::detail::kNvfp4DownFamilyFirstA4Tokens;
     const std::array invocations{
         Invocation{1, ops::LinearPolicy::A16Only},
+        Invocation{3, ops::LinearPolicy::A16Only},
         Invocation{4, ops::LinearPolicy::A16Only},
         Invocation{5, ops::LinearPolicy::A16Only},
         Invocation{8, ops::LinearPolicy::A16Only},

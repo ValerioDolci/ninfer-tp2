@@ -21,11 +21,15 @@ void launch_exact(const Tensor& x, const Weight& weight, Tensor& residual, cudaS
     // The [5120,3072] half takes the warp crossover of the [5120,6144] problem it halves.
     constexpr bool kOutputFamily = Geometry::kInputRows == Nvfp4N5120K6144::kInputRows ||
                                    Geometry::kInputRows == Nvfp4N5120K3072::kInputRows;
+    // One warp owns a row, so residency changes speed only. At T=4..5 the MLP down family asks for
+    // 6 CTAs per SM (<= 80 registers instead of 96): on an RTX 5070 Ti [5120,8704] 47.1 -> 46.5 us
+    // at T=4 and 57.1 -> 51.3 at T=5. T=3 keeps 1: there it cost +9 % (43.3 -> 47.1 us).
+    constexpr int kMinBlocks = !kOutputFamily && ActiveTokens >= 4 ? 6 : 1;
     using Schedule = Nvfp4A16SimtSchedule<
         (ActiveTokens <= 16 && ActiveTokens >= (kOutputFamily ? 14 : 8)) ? 16 : 4, 1,
         2, (ActiveTokens >= 17 && ActiveTokens <= 20) ? 8 : 16, ActiveTokens, 1,
         Nvfp4SimtActivationAccess::TokenPacked, Nvfp4ScaleAccess::Direct, Nvfp4CodeCache::Default,
-        1, Nvfp4SimtBlockOrder::RowsContiguous, 1>;
+        1, Nvfp4SimtBlockOrder::RowsContiguous, kMinBlocks>;
     launch_nvfp4_a16_simt<
         Nvfp4ScheduleInstance<Schedule, Geometry::kInputRows, ActiveTokens, true>>(
         nvfp4_a16_operands(x, weight),

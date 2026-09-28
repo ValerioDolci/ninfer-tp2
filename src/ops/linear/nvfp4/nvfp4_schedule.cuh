@@ -215,13 +215,21 @@ struct Nvfp4A16MmaSchedule {
 
 enum class Nvfp4ActivationStage : std::uint8_t { ActiveOnly, PaddedZero };
 
+// RowTiles stacks independent 16-row MMA tiles in one CTA, so each staged activation slice feeds
+// all of them. StageTokens bounds the activation rows held in shared memory: the MMA's remaining
+// token rows read a copy of a staged row, and their columns are never stored. Neither changes the
+// arithmetic of an output element (nvfp4_a16_sliced_k_mma.cuh); both only trade shared memory,
+// registers and resident CTAs.
 template <int KWarps, int TileTokens, int MinBlocksPerSm, Cache ActivationCache = Cache::ca,
           Cache WeightCache                    = Cache::cg,
-          Nvfp4ActivationStage ActivationStage = Nvfp4ActivationStage::ActiveOnly, int Stages = 1>
+          Nvfp4ActivationStage ActivationStage = Nvfp4ActivationStage::ActiveOnly, int Stages = 1,
+          int RowTiles = 1, int StageTokens = TileTokens>
 struct Nvfp4A16SlicedKMmaSchedule {
     static_assert(KWarps == 2 || KWarps == 4 || KWarps == 8 || KWarps == 16);
     static_assert(TileTokens > 0 && TileTokens % 8 == 0);
     static_assert(Stages == 1 || Stages == 2);
+    static_assert(RowTiles == 1 || RowTiles == 2 || RowTiles == 4);
+    static_assert(StageTokens > 0 && StageTokens <= TileTokens);
     static_assert(MinBlocksPerSm > 0);
     static constexpr int kStaticK           = 0;
     static constexpr int kTokenCapacity     = TileTokens;
@@ -233,14 +241,17 @@ struct Nvfp4A16SlicedKMmaSchedule {
     static constexpr auto kWeightCache      = WeightCache;
     static constexpr auto kActivationStage  = ActivationStage;
     static constexpr int kStages            = Stages;
+    static constexpr int kRowTiles          = RowTiles;
+    static constexpr int kStageTokens       = StageTokens;
     static constexpr int kThreads           = KWarps * 32;
     static constexpr int kTileKPerWarp      = 64;
     static constexpr int kBlockK            = KWarps * kTileKPerWarp;
-    static constexpr int kBlockRows         = 16;
-    static constexpr int kRowsPerLoaderWarp = 16 / KWarps;
+    static constexpr int kBlockRows         = 16 * RowTiles;
+    static constexpr int kRowsPerLoaderWarp = kBlockRows / KWarps;
+    static_assert(kBlockRows % KWarps == 0);
     static constexpr int kStagingBytes =
-        Stages * (16 * (kBlockK / 2 + kBlockK / 16) + KWarps * TileTokens * 64 * 2);
-    static constexpr int kPartialBytes = KWarps * (TileTokens / 8) * 32 * 4 * 4;
+        Stages * (kBlockRows * (kBlockK / 2 + kBlockK / 16) + KWarps * StageTokens * 64 * 2);
+    static constexpr int kPartialBytes = KWarps * RowTiles * (TileTokens / 8) * 32 * 4 * 4;
     static constexpr int kSharedBytes =
         kStagingBytes > kPartialBytes ? kStagingBytes : kPartialBytes;
     static_assert(kSharedBytes <= 99 * 1024);
