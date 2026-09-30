@@ -4,6 +4,7 @@ target_sources(ninfer_ops PRIVATE
   "${CMAKE_CURRENT_LIST_DIR}/../common/peer_mailbox.cu"
   "${CMAKE_CURRENT_LIST_DIR}/../launcher/argmax_split.cu"
   "${CMAKE_CURRENT_LIST_DIR}/../launcher/concat_rows.cu"
+  "${CMAKE_CURRENT_LIST_DIR}/../launcher/topk_split.cu"
 )
 
 # The two-device shards of upstream's fused projections: upstream's own sources compiled again

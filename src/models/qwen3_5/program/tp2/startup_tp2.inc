@@ -3,8 +3,23 @@
 // checks, sharing startup.cpp's private reserve_* helpers. Not a header. Our file; see
 // docs/maintainer/upstream-merge.md.
 
+#include "models/qwen3_5/execution/tp2/draft_split.h"
+
 namespace ninfer::models::qwen3_5::detail {
 namespace {
+
+std::size_t dflash2_candidates_workspace_tp2(const SequencePlanImpl& plan, std::int32_t columns) {
+    const auto& parameters = *plan.parameters;
+    const execution::ProposalParameters& head = *parameters.proposal;
+    if (!head.split()) {
+        return ops::linear_topk_workspace_capacity_bytes(head.head.weight.qtype, head.head.weight.n,
+                                                         head.head.weight.k, columns, columns);
+    }
+    // Rank 0 ranks its block and rank 1 its own; both hold the broadcast hidden, the candidates
+    // and their staging (execution::dflash2_candidates_split).
+    return execution::dflash2_candidates_split_workspace_bytes(
+        head, dimension(parameters.model.config().text.hidden_size), columns, true);
+}
 
 // One rank's transient workspace at tensor-parallel width 2, following the allocation order of
 // TextContext's split schedule (execution/text.cpp: prefill_impl_tp2 with its MTP prompt

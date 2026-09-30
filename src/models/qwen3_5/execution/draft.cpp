@@ -5,6 +5,7 @@
 #include "models/qwen3_5/program/context.h"
 #include "models/qwen3_5/program/program_impl.h"
 #include "models/qwen3_5/execution/workspace.h"
+#include "models/qwen3_5/execution/tp2/draft_split.h"
 
 #include "core/nvtx.h"
 #include "ninfer/ops/argmax.h"
@@ -361,7 +362,13 @@ void propose_dflash2_batch(DFlashBatchContext& state, qwen3_5::DFlashDecodeState
                 ids_flat, scores, work, stream);
         } else {
             const auto& head = *state.execution.parameters.proposal;
-            if (head.token_ids) {
+            const TpExecution* tp = state.execution.tp;
+            if (tp != nullptr && head.split()) {
+                // Vocabulary-split head (tp 2): both ranks rank their blocks, rank 0 merges.
+                dflash2_candidates_split({hidden, hidden}, {&head, tp->parameters->proposal ? &*tp->parameters->proposal : nullptr},
+                                         true, ids_flat, scores, {&work, tp->work},
+                                         *tp->execution, *tp->events);
+            } else if (head.token_ids) {
                 ops::linear_topk(hidden, head.head.weight, *head.token_ids, ids_flat, scores, work,
                                  stream);
             } else {

@@ -300,6 +300,10 @@ void reserve_linear_add(WorkspaceLayoutBuilder& layout, const execution::LinearP
                                 p.weight.qtype, p.weight.n, p.weight.k, p.policy, first, last));
 }
 
+// At tensor-parallel width 2 (program/tp2/startup_tp2.inc): one rank's scratch of the DFlash2
+// candidate ranking over `columns` final drafter columns, split by vocabulary or whole on rank 0.
+std::size_t dflash2_candidates_workspace_tp2(const SequencePlanImpl& plan, std::int32_t columns);
+
 // The drafter's transient phases (execution/draft.cpp). They run on the executing device at tp 1
 // and on rank 0 alone at tp 2, where the drafter and its proposal head are whole; both widths plan
 // them from rank 0's Parameters.
@@ -390,9 +394,10 @@ std::size_t dflash_proposal_workspace(const SequencePlanImpl& plan, std::int32_t
         const auto mask_columns = drafts * batch;
         reserve_matrix(layout, DType::BF16, dimension(config.hidden_size), mask_columns);
         reserve_matrix(layout, DType::FP32, dimension(draft.dflash2->selector_top_k), mask_columns);
-        reserve_scratch(layout, ops::linear_topk_workspace_capacity_bytes(
-                                    head.weight.qtype, head.weight.n, head.weight.k, mask_columns,
-                                    mask_columns));
+        reserve_scratch(layout, plan.tp != 1 ? dflash2_candidates_workspace_tp2(plan, mask_columns)
+                                              : ops::linear_topk_workspace_capacity_bytes(
+                                                    head.weight.qtype, head.weight.n, head.weight.k,
+                                                    mask_columns, mask_columns));
         reserve_matrix(layout, DType::BF16, dimension(draft.dflash2->selector_rank), mask_columns);
         reserve_linear(layout, parameters.draft->selector->hidden_projection, mask_columns,
                        mask_columns);

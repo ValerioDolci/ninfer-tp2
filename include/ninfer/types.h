@@ -1072,8 +1072,9 @@ struct LoadSummary {
     // or "legacy" (NINFER_TP_MAILBOX_LEGACY=1, the original kernel, bit-identical results);
     // empty otherwise.
     std::string tp_mailbox_kernel;
-    // tp 2 MTP with the optimized proposal head: where it proposes, "split by vocabulary" (both
-    // ranks, the default) or "rank 0" (NINFER_TP_DRAFT_HEAD=primary); empty otherwise.
+    // tp 2 MTP or DFlash2 with the optimized proposal head: where it proposes, "split by
+    // vocabulary" (both ranks, the default) or "rank 0" (NINFER_TP_DRAFT_HEAD=primary, and for
+    // DFlash2 NINFER_TP_DRAFTER=primary); empty otherwise.
     std::string tp_proposal_head;
     ContextCostSummary context_cost;
 };

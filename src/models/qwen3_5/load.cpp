@@ -50,9 +50,9 @@ namespace {
 
 void validate_tensor_parallel(const LoadOptions& options) {
     loading::validate_tensor_parallel_ranks(options);
-    // The drafter runs on rank 0 only while the full output head is split by vocabulary rows, and
-    // the DFlash2 candidate ranking (linear_topk) has no vocabulary-split form: the drafter
-    // proposes through the optimized head, which rank 0 holds whole.
+    // The full output head is split by vocabulary rows and the DFlash2 candidate ranking has a
+    // vocabulary-split form only for the optimized head (ops::linear_topk_split): the drafter
+    // proposes through it.
     if (options.tp > 1 && options.masked_draft() && !options.proposal_enabled()) {
         throw std::invalid_argument(
             "tensor-parallel DFlash requires the optimized proposal head (--lm-head-draft)");

@@ -83,6 +83,7 @@ hidden/residual axis is never split.
 | norms, `text/token_embedding` | Replicated | whole on both ranks |
 | `vision/*` | SingleDevice(`vision_rank`) | whole on the Vision rank (§8) |
 | `proposal/head` under MTP | Rows, by proposal vocabulary (indexed head, at most 65536 rows per rank) | Q4 `[131072,5120]` → `[65536,5120]` |
+| `proposal/head`, `proposal/token_ids` under DFlash2 | Rows, by proposal vocabulary (indexed head, 65536 rows per rank) | Q4 `[131072,5120]` → `[65536,5120]`, I32 `[131072]` → `[65536]` |
 | `dflash/*`, `dflash2/*`, `proposal/*` otherwise | PrimaryOnly | whole on rank 0 |
 
 A shard is a standalone weight of the parent's format and layout with one axis narrowed, never a
@@ -484,15 +485,19 @@ The commit folds each rank's ReplaySSM records into its own GDN state with the s
 The prompt MTP alignment runs on both ranks, rank 1 keeping its final-normed chunk in its own
 `prefill_hidden`, and rank 1 keeps its own RoPE delta (`TpExecution::rope_delta`).
 
-**DFlash2.** Only the target is split; the drafter, its context features and the optimized proposal
-head stay whole on rank 0 (the head splits only under MTP, whose proposal is a plain argmax). The feature tap reads rank 0's residual after each captured layer, which
+**DFlash2.** The target and the optimized proposal head are split; the drafter and its context
+features stay whole on rank 0. The head ranks its candidates by vocabulary blocks: rank 1 receives
+the drafter's final hidden through an all-reduce against zeros, each rank takes the top sixteen of
+its `[65536,5120]` block (`ops::linear_topk_split`) and one all-reduce of their packed 64-bit keys
+gives rank 0 the exact top sixteen of the whole head (`execution::dflash2_candidates_split`);
+`NINFER_TP_DRAFT_HEAD=primary` or `NINFER_TP_DRAFTER=primary` keeps the head whole on rank 0. The
+feature tap reads rank 0's residual after each captured layer, which
 the all-reduce has already completed, so features need no exchange. In a round
 (`dflash_decode_batch_body` in [`draft.cpp`](../../src/models/qwen3_5/execution/draft.cpp)) rank 0
 appends the context and proposes, rank 1 pulls the draft tokens after `inputs_ready(0)`, both
 verify, rank 0 accepts and rank 1 pulls the accepted counts. `--lm-head-draft` is mandatory at
-tp 2: candidate ranking (`linear_topk`) is registered only for one complete head, the full output
-head is split by vocabulary, and only the optimized head, whole on rank 0, can serve the rank-0
-drafter. The Engine, `plan_load` and the planner each reject the other case. A drafter with
+tp 2: the full output head is split by vocabulary and candidate ranking has a vocabulary-split form
+only for the optimized head. The Engine, `plan_load` and the planner each reject the other case. A drafter with
 full-attention layers is also rejected, since its paged KV would have no rank 1 mirror while
 `publish_kv_rows` requires one; the published drafter has none. The full contract is in
 [DFlash and DFlash2](dflash.md#tensor-parallel-execution).

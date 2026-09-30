@@ -2,6 +2,7 @@
 
 #include "artifact/reader.h"
 #include "ninfer/ops/tp2/argmax.h"
+#include "ninfer/ops/tp2/linear_topk.h"
 
 #include <algorithm>
 #include <cstdlib>
@@ -191,24 +192,49 @@ void merge_axis(ParentState& state, const LogicalShard& shard, const std::string
     }
 }
 
-// NINFER_TP_DRAFT_HEAD=primary keeps the optimized MTP proposal head whole on rank 0, its
-// placement before the vocabulary split, for A/B runs on one binary.
+// NINFER_TP_DRAFT_HEAD=primary keeps the optimized proposal head whole on rank 0, its placement
+// before the vocabulary split, for A/B runs on one binary.
 bool proposal_head_primary_requested() {
     const char* value = std::getenv("NINFER_TP_DRAFT_HEAD");
     return value != nullptr && std::string_view(value) == "primary";
 }
 
-// MTP proposes on both ranks, so its optimized head splits by vocabulary rows when it is indexed
-// (fewer rows than the vocabulary, every row a candidate) and each rank's block fits the split
-// argmax. DFlash2's rank-0 drafter ranks candidates over the whole head (linear_topk), which stays
-// PrimaryOnly, as do the proposal token IDs: rank 0 maps the selected row.
+// NINFER_TP_DRAFTER=primary keeps every DFlash2 drafter weight and its proposal head whole on rank
+// 0, the placement before the drafter split, for A/B runs on one binary.
+bool drafter_primary_requested() {
+    const char* value = std::getenv("NINFER_TP_DRAFTER");
+    return value != nullptr && std::string_view(value) == "primary";
+}
+
+// The optimized head splits by vocabulary rows when it is indexed (fewer rows than the vocabulary,
+// every row a candidate) and each rank's block has a registered split route. MTP proposes on both
+// ranks through the split argmax (at most ops::kArgmaxSplitMaxRowsPerRank rows per rank); its
+// token IDs stay PrimaryOnly, rank 0 mapping the selected row. DFlash2 ranks candidates through the
+// vocabulary-split top sixteen (ops::linear_topk_split, [65536,5120] blocks), whose keys carry
+// global token IDs: its token IDs split with the head's rows.
+bool split_proposal_rows(std::uint64_t rows, const Config& config, const LoadOptions& options) {
+    if (proposal_head_primary_requested() || rows == config.text.vocab_size) { return false; }
+    const auto tp = static_cast<std::uint64_t>(options.tp);
+    if (rows % tp != 0) { return false; }
+    if (options.mtp()) {
+        return rows / tp <= static_cast<std::uint64_t>(ops::kArgmaxSplitMaxRowsPerRank);
+    }
+    if (options.dflash2()) {
+        return !drafter_primary_requested() &&
+               rows / tp == static_cast<std::uint64_t>(ops::kLinearTopKSplitRows);
+    }
+    return false;
+}
+
 bool split_proposal_head(const artifact::Shape& shape, const Config& config,
                          const LoadOptions& options) {
-    if (!options.mtp() || shape.size() != 2 || proposal_head_primary_requested()) { return false; }
-    const auto rows = shape.front();
-    const auto tp   = static_cast<std::uint64_t>(options.tp);
-    return rows != config.text.vocab_size && rows % tp == 0 &&
-           rows / tp <= static_cast<std::uint64_t>(ops::kArgmaxSplitMaxRowsPerRank);
+    return shape.size() == 2 && split_proposal_rows(shape.front(), config, options);
+}
+
+bool split_proposal_token_ids(const artifact::Shape& shape, const Config& config,
+                              const LoadOptions& options) {
+    return options.dflash2() && shape.size() == 1 &&
+           split_proposal_rows(shape.front(), config, options);
 }
 
 // logical_shard() for options that validate_tensor_parallel_ranks() accepted.
@@ -219,7 +245,8 @@ LogicalShard shard_rule(std::string_view name, const artifact::Shape& shape, con
     if (in_component(name, "vision")) {
         return whole(ShardAxis::SingleDevice, options.vision_rank);
     }
-    if (name == "proposal/head" && split_proposal_head(shape, config, options)) {
+    if ((name == "proposal/head" && split_proposal_head(shape, config, options)) ||
+        (name == "proposal/token_ids" && split_proposal_token_ids(shape, config, options))) {
         const auto rows = leading(name, shape);
         return even(name, ShardAxis::Rows, rows, rows, tp);
     }

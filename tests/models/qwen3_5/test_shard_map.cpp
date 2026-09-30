@@ -125,9 +125,10 @@ void logical_policy_27b() {
         expect(config, name, {h}, ShardAxis::PrimaryOnly);
     }
     {
-        // Under MTP the indexed optimized proposal head splits by vocabulary rows; its token IDs,
-        // DFlash2's head, a head over the whole vocabulary and NINFER_TP_DRAFT_HEAD=primary stay
-        // on rank 0.
+        // Under MTP the indexed optimized proposal head splits by vocabulary rows and its token
+        // IDs stay on rank 0. Under DFlash2 the head and its token IDs split by the same rows
+        // ([65536,5120] blocks for the split top sixteen). A head over the whole vocabulary,
+        // NINFER_TP_DRAFT_HEAD=primary and, for DFlash2, NINFER_TP_DRAFTER=primary stay on rank 0.
         constexpr std::uint64_t proposal = 131072;
         const LoadOptions mtp{.speculative = SpeculativeBackend::Mtp, .tp = 2};
         const LoadOptions dflash2{.speculative = SpeculativeBackend::DFlash2, .tp = 2};
@@ -135,10 +136,23 @@ void logical_policy_27b() {
                {halves(proposal, 0), halves(proposal, 1)}, 0, mtp);
         expect(config, "proposal/token_ids", {proposal}, ShardAxis::PrimaryOnly, {}, 0, mtp);
         expect(config, "proposal/head", {vocab, h}, ShardAxis::PrimaryOnly, {}, 0, mtp);
-        expect(config, "proposal/head", {proposal, h}, ShardAxis::PrimaryOnly, {}, 0, dflash2);
+        expect(config, "proposal/head", {proposal, h}, ShardAxis::Rows,
+               {halves(proposal, 0), halves(proposal, 1)}, 0, dflash2);
+        expect(config, "proposal/token_ids", {proposal}, ShardAxis::Rows,
+               {halves(proposal, 0), halves(proposal, 1)}, 0, dflash2);
+        expect(config, "proposal/head", {vocab, h}, ShardAxis::PrimaryOnly, {}, 0, dflash2);
+        expect(config, "proposal/head", {2 * proposal, h}, ShardAxis::PrimaryOnly, {}, 0, dflash2);
         ::setenv("NINFER_TP_DRAFT_HEAD", "primary", 1);
         expect(config, "proposal/head", {proposal, h}, ShardAxis::PrimaryOnly, {}, 0, mtp);
+        expect(config, "proposal/head", {proposal, h}, ShardAxis::PrimaryOnly, {}, 0, dflash2);
+        expect(config, "proposal/token_ids", {proposal}, ShardAxis::PrimaryOnly, {}, 0, dflash2);
         ::unsetenv("NINFER_TP_DRAFT_HEAD");
+        ::setenv("NINFER_TP_DRAFTER", "primary", 1);
+        expect(config, "proposal/head", {proposal, h}, ShardAxis::Rows,
+               {halves(proposal, 0), halves(proposal, 1)}, 0, mtp);
+        expect(config, "proposal/head", {proposal, h}, ShardAxis::PrimaryOnly, {}, 0, dflash2);
+        expect(config, "proposal/token_ids", {proposal}, ShardAxis::PrimaryOnly, {}, 0, dflash2);
+        ::unsetenv("NINFER_TP_DRAFTER");
     }
     expect(config, "vision/layers/0/attention/query", {1152, 1152}, ShardAxis::SingleDevice, {}, 1,
            {.tp = 2, .vision_rank = 1});

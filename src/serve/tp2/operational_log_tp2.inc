@@ -47,7 +47,10 @@ void log_tensor_parallel(spdlog::logger& logger, const GenerationService& servic
                           load.tp_mailbox_fallback);
         }
         if (!load.tp_proposal_head.empty()) {
-            logger.info("tensor parallel | MTP proposal head: {}", load.tp_proposal_head);
+            logger.info("tensor parallel | {} proposal head: {}",
+                        engine.speculative.backend == ninfer::SpeculativeBackend::DFlash2 ? "DFlash2"
+                                                                                  : "MTP",
+                        load.tp_proposal_head);
         }
     }
     // Measured against the planned per-device allowance, to calibrate the tp 2 constants.

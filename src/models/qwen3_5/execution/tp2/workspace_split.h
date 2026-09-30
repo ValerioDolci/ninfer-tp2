@@ -6,6 +6,7 @@
 #include "models/qwen3_5/execution/workspace.h"
 #include "ninfer/ops/argmax.h"
 #include "ninfer/ops/tp2/argmax.h"
+#include "ninfer/ops/tp2/linear_topk.h"
 
 #include <cstdint>
 
@@ -64,6 +65,35 @@ TensorParallelProposalRoots tp_proposal_argmax(Allocator& allocator, std::int32_
     out.local      = vector(allocator, DType::I32, columns);
     out.candidates = matrix(allocator, DType::BF16, ops::kArgmaxSplitCandidateRows, columns);
     out.staging    = matrix(allocator, DType::BF16, ops::kArgmaxSplitCandidateRows, columns);
+    return out;
+}
+
+// The vocabulary-split DFlash2 candidate ranking over `columns` final drafter hidden columns on one
+// rank (execution::dflash2_candidates_split): with `broadcast`, the hidden rank 1 receives from rank
+// 0 and the all-reduce staging it arrives through (rank 1's `hidden` is its copy, rank 0's is
+// unused); then the rank's top sixteen, its packed candidates and their all-reduce staging.
+struct TensorParallelCandidateRoots {
+    Tensor hidden;
+    Tensor hidden_staging;
+    Tensor ids;
+    Tensor scores;
+    Tensor candidates;
+    Tensor staging;
+};
+
+template <class Allocator>
+TensorParallelCandidateRoots tp_dflash2_candidates(Allocator& allocator, std::int32_t hidden,
+                                                   std::int32_t columns, bool broadcast) {
+    constexpr std::int32_t top_k = 16;
+    TensorParallelCandidateRoots out;
+    if (broadcast) {
+        out.hidden         = matrix(allocator, DType::BF16, hidden, columns);
+        out.hidden_staging = matrix(allocator, DType::BF16, hidden, columns);
+    }
+    out.ids        = matrix(allocator, DType::I32, top_k, columns);
+    out.scores     = matrix(allocator, DType::FP32, top_k, columns);
+    out.candidates = matrix(allocator, DType::BF16, ops::kTopKSplitCandidateRows, columns);
+    out.staging    = matrix(allocator, DType::BF16, ops::kTopKSplitCandidateRows, columns);
     return out;
 }
 

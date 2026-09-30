@@ -86,7 +86,8 @@ void ProgramImpl::construct_tensor_parallel(const SequencePlanImpl& plan,
         }
         execution_context = execution_in;
         peer_parameters   = peer_parameters_in;
-        if (speculative_backend == SpeculativeBackend::Mtp &&
+        if ((speculative_backend == SpeculativeBackend::Mtp ||
+             speculative_backend == SpeculativeBackend::DFlash2) &&
             proposal_head == ProposalHead::Optimized) {
             tp_transport_status.proposal_head =
                 peer_parameters->proposal ? "split by vocabulary" : "rank 0";

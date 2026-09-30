@@ -32,7 +32,10 @@ namespace ninfer::models::qwen3_5::loading {
 //            run on rank 0 only, so rank 1 holds none of them. Under MTP, proposal/head instead
 //            splits by vocabulary Rows when indexed with at most ops::kArgmaxSplitMaxRowsPerRank
 //            rows per rank ([131072,5120] -> [65536,5120]); proposal/token_ids stays PrimaryOnly.
-//            NINFER_TP_DRAFT_HEAD=primary keeps that head PrimaryOnly too.
+//            Under DFlash2 the indexed head splits into ops::kLinearTopKSplitRows blocks and
+//            proposal/token_ids splits with it (the split top sixteen keys carry global IDs).
+//            NINFER_TP_DRAFT_HEAD=primary, and for DFlash2 NINFER_TP_DRAFTER=primary, keep them
+//            PrimaryOnly.
 //
 // MTP and a masked draft share text/token_embedding and the selected output head by WeightId,
 // so they see that parameter's per-rank view: MTP runs on both ranks and gathers the
