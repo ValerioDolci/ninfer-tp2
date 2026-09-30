@@ -84,7 +84,11 @@ hidden/residual axis is never split.
 | `vision/*` | SingleDevice(`vision_rank`) | whole on the Vision rank (§8) |
 | `proposal/head` under MTP | Rows, by proposal vocabulary (indexed head, at most 65536 rows per rank) | Q4 `[131072,5120]` → `[65536,5120]` |
 | `proposal/head`, `proposal/token_ids` under DFlash2 | Rows, by proposal vocabulary (indexed head, 65536 rows per rank) | Q4 `[131072,5120]` → `[65536,5120]`, I32 `[131072]` → `[65536]` |
-| `dflash/*`, `dflash2/*`, `proposal/*` otherwise | PrimaryOnly | whole on rank 0 |
+| `dflash2/layers/*/attention/query`, `…/{key,value,context_key,context_value}` | Rows, by the drafter's 32 query / 8 KV heads (context key/value share the key/value parents' rows) | packed Q\|K\|V Q8 `[6144,5120]` → `[3072,5120]` (16 Q, 4 KV heads of 128) |
+| `dflash2/layers/*/attention/output`, `…/mlp/{gate,up}`, `…/mlp/down` | Columns by query heads, Rows, Columns | `[5120,4096]` → `[5120,2048]`, gate\|up `[34816,5120]` → `[17408,5120]`, `[5120,17408]` → `[5120,8704]` |
+| `dflash2/` norms, `…/{attention,mlp}_conv/*`, `feature_projection`, `context_norm`, `final_norm` | Replicated | whole on both ranks |
+| `dflash2/candidate_selector/*` | PrimaryOnly | whole on rank 0 |
+| `dflash/*`, `dflash2/*` with `NINFER_TP_DRAFTER=primary`, `proposal/*` otherwise | PrimaryOnly | whole on rank 0 |
 
 A shard is a standalone weight of the parent's format and layout with one axis narrowed, never a
 view into the parent's payload, so each rank runs the ordinary single-device dispatch at the shard's
@@ -422,7 +426,8 @@ prefix at tp 2 carries:
 - for a zero-suffix reuse, nothing on rank 1: the first token comes through the vocabulary-split
   head from rank 0's retained hidden, which rank 1 pulls once (`project_split_output_head` in
   [`prefill.cpp`](../../src/models/qwen3_5/program/prefill.cpp)), for every backend;
-- under DFlash2, the drafter's rings in rank 0's StateImages only.
+- under DFlash2, the drafter's rings of each rank's KV heads in that rank's StateImages (rank 0's
+  alone with `NINFER_TP_DRAFTER=primary`).
 
 The current code declines no reuse plan at tp 2. `815615e6` briefly made admission decline
 zero-suffix and speculative reuse at tp 2 and turned unmaterializable checkpoints into misses; once
@@ -438,8 +443,9 @@ of the rank without the tower), and `runtime::resolve_kv_capacity_symmetric`
 ([`kv_capacity.cpp`](../../src/runtime/engine/kv_capacity.cpp)) resolves against the minimum. The
 automatic headroom is the fixed `kDefaultKvCapacityHeadroomBytes` (1 GiB), subtracted once from
 that bottleneck budget as at tp 1; an explicit capacity carries none. Under DFlash2 rank 1 is still
-budgeted for rank 0's drafter state; rank 0, which also holds the drafter weights, is normally the
-bottleneck anyway.
+budgeted for rank 0's drafter state with `NINFER_TP_DRAFTER=primary`; with the split drafter both
+ranks hold the same drafter state, so the one layout is exact for both, and rank 0, which also holds
+the selector and Vision, is normally the bottleneck.
 
 ## 7. Speculative decoding at tp 2
 
@@ -485,17 +491,21 @@ The commit folds each rank's ReplaySSM records into its own GDN state with the s
 The prompt MTP alignment runs on both ranks, rank 1 keeping its final-normed chunk in its own
 `prefill_hidden`, and rank 1 keeps its own RoPE delta (`TpExecution::rope_delta`).
 
-**DFlash2.** The target and the optimized proposal head are split; the drafter and its context
-features stay whole on rank 0. The head ranks its candidates by vocabulary blocks: rank 1 receives
-the drafter's final hidden through an all-reduce against zeros, each rank takes the top sixteen of
-its `[65536,5120]` block (`ops::linear_topk_split`) and one all-reduce of their packed 64-bit keys
-gives rank 0 the exact top sixteen of the whole head (`execution::dflash2_candidates_split`);
-`NINFER_TP_DRAFT_HEAD=primary` or `NINFER_TP_DRAFTER=primary` keeps the head whole on rank 0. The
-feature tap reads rank 0's residual after each captured layer, which
-the all-reduce has already completed, so features need no exchange. In a round
-(`dflash_decode_batch_body` in [`draft.cpp`](../../src/models/qwen3_5/execution/draft.cpp)) rank 0
-appends the context and proposes, rank 1 pulls the draft tokens after `inputs_ready(0)`, both
-verify, rank 0 accepts and rank 1 pulls the accepted counts. `--lm-head-draft` is mandatory at
+**DFlash2.** The target, the drafter and the optimized proposal head are split; the candidate
+selector stays on rank 0. Each drafter layer runs like a Text layer, rank r with its 16/4 heads and
+MLP half, closing each branch with a row-parallel projection whose all-reduce precedes the dynamic
+convolution's finish on both ranks, so the residual stays replicated (ten exchanges per round at
+K=7). Both ranks keep the drafter's state (their KV heads' rings, prefill and pending features), each
+feature tap reading its own copy of the replicated residual, so features need no exchange. The head
+ranks its candidates by vocabulary blocks: each rank takes the top sixteen of its `[65536,5120]` block
+(`ops::linear_topk_split`) and one all-reduce of the packed 64-bit keys gives rank 0 the exact top
+sixteen of the whole head (`execution::dflash2_candidates_split`). `NINFER_TP_DRAFTER=primary` keeps
+the drafter whole on rank 0 (rank 1 then receives the final hidden through an all-reduce against
+zeros for the split head) and `NINFER_TP_DRAFT_HEAD=primary` the head. In a round
+(`dflash_decode_batch_body` in [`draft.cpp`](../../src/models/qwen3_5/execution/draft.cpp) and
+`execution/tp2/draft_tp2.inc`) both ranks append their context and draft, rank 0 selects, rank 1
+pulls the draft tokens after `inputs_ready(0)`, both verify, rank 0 accepts and rank 1 pulls the
+accepted counts. `--lm-head-draft` is mandatory at
 tp 2: the full output head is split by vocabulary and candidate ranking has a vocabulary-split form
 only for the optimized head. The Engine, `plan_load` and the planner each reject the other case. A drafter with
 full-attention layers is also rejected, since its paged KV would have no rank 1 mirror while
@@ -581,7 +591,8 @@ in [`tests/ops/tests.cmake`](../../tests/ops/tests.cmake), `tests/artifact/tests
 | `ninfer_qwen3_5_text_context_tp2_real_test` | real artifact at tp 2: finite logits, "What is 17*23?" answers 391 |
 | `ninfer_qwen3_5_engine_tp2_real_test` | Engine with graphs, context cache and two lanes: single and concurrent answers (rank 1 must prefill through each lane's own row), prefix reuse, ≥ 80% reuse of a ~6k-token prefix with 4 and 1 lanes, reuse after a one-shot flood |
 | `ninfer_qwen3_5_engine_mtp_tp2_real_test` (+ `_optimized_real`) | MTP K=3 against the same model without speculation (answers right, common prefixes, half identical), acceptance floor, two-lane rounds, repeated binds (leaked rank 1 row), ~9k-token prefix resume through the bridge, zero-suffix repeat |
-| `ninfer_qwen3_5_engine_dflash2_tp2_real_test` | DFlash2 K=4 `--lm-head-draft`: token ids identical to plain tp 2 on three prompts, ≥ 30% acceptance, two-lane rounds, prefix reuse |
+| `ninfer_qwen3_5_engine_dflash2_tp2_real_test` | DFlash2 K=4 `--lm-head-draft` (split drafter): token ids identical to plain tp 2 on three prompts, ≥ 30% acceptance, two-lane rounds, prefix reuse |
+| `ninfer_proposal_topk_split_test`, `ninfer_dflash2_head_blocks_test` | the split top sixteen against `linear_topk` over the whole head (ids and score bits, eager and through the mailbox, planted ties); the drafter's head-block Ops (16/4 attention, H4 context K/V, the Q8 QKV shard, 16/4 norm-RoPE) against the complete profiles' heads bit for bit, the convolution finish and `n5120_k2048` against FP64 |
 | `ninfer_qwen3_5_engine_vision_tp2_real_test` (+ `_mtp_real`, `_dflash2_real`) | `vision_device` outside `devices` rejected, text identical with and without Vision, colors of synthetic images with the tower on device 0, same token ids with it on device 1, second turn resumed |
 | `ninfer_serve_engine_failure_real_test` | a thrown decode-round failure (injected by wrapping `cudaStreamSynchronize`) stops the server with `engine_failed()` set, so it exits 2 |
 
@@ -612,8 +623,8 @@ short DFlash2 run. It is the gate of every upstream merge and every change to th
   allowances come from one measurement (32K, C=1, INT8 KV); an overrun is absorbed by that headroom,
   and an explicit capacity has none.
 - **Unused rank 1 memory.** Rank 1's round state keeps the full-vocabulary logits frames of rank 0's
-  layout, which it never writes (`persistent_layout` in `startup.cpp`); under DFlash2 it is also
-  budgeted for rank 0's drafter state.
+  layout, which it never writes (`persistent_layout` in `startup.cpp`); under DFlash2 with
+  `NINFER_TP_DRAFTER=primary` it is also budgeted for rank 0's drafter state.
 - **Transport after startup.** A mailbox hang after `prepare_graphs` stops the Engine; there is no
   runtime step-down. Kernel-serializing profilers can trigger it (`--no-tp-mailbox` avoids it). The
   probe exercises one 4 KiB exchange. DFlash2 steps straight to copies and has not been run under
@@ -656,7 +667,7 @@ lists. The `tp2/` directories below are ours throughout.
 | `src/artifact/slices.*`, `binder.*`, `materializer.*`, `views.cpp` | shard geometry and plane copies, per-device placement, upload and views |
 | `src/models/load_options.h`, `src/models/qwen3_5/load/sharding.*`, `load.cpp` | `LoadOptions::{tp,vision_rank}`, placement rules, tp load checks |
 | `src/models/qwen3_5/execution/tp.*` | `TpExecution`, `shard_text_config`, rank-0 logits gather |
-| `src/models/qwen3_5/execution/tp2/` | split Text schedule (`text_tp2.inc`, `text_context_{public,private}.inc`), split attention/GDN/FFN/MTP forms, split projection helpers, tp2 workspace recipes |
+| `src/models/qwen3_5/execution/tp2/` | split Text schedule (`text_tp2.inc`, `text_context_{public,private}.inc`), split attention/GDN/FFN/MTP forms, the split DFlash2 drafter (`draft_split.{h,cpp}`, `draft_tp2.inc`), split projection helpers, tp2 workspace recipes |
 | `src/models/qwen3_5/execution/{draft,vision,parameters}.cpp` | DFlash2 and Vision two-device branches, `Parameters(model, rank)` |
 | `src/models/qwen3_5/state/state_image.h` | StateImage mirror |
 | `src/models/qwen3_5/program/tp2/` | `PeerRuntime`, mirrors, mailbox, probe, step-down (`program_impl_tp2.inc`, `program_impl_{public,private}.inc`); tp2 workspace plan and rejections (`startup_tp2.inc`); MTP bridge, split verification, split prefill head |

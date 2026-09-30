@@ -11,6 +11,5 @@
 #include "ops/common/warp.cuh"
 #include "ops/common/dflash_rope.cuh"
 
-#define NINFER_CONTEXT_KV_MATERIALIZE_KV_HEADS 4
-#define context_kv_materialize_launch context_kv_materialize_h4_launch
+#include "ops/context_kv_materialize/tp2/materialize_h4_names.h"
 #include "ops/context_kv_materialize/materialize.cu"

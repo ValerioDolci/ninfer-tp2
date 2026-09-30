@@ -295,42 +295,66 @@ target state and continuation metadata. Their coverage must agree. These rules a
 
 ## Tensor-parallel execution
 
-At `tp=2` DFlash2 splits the target ([Qwen3.5 model](qwen3_5-model.md#tensor-parallel-execution))
-and the candidate ranking of the optimized proposal head. The drafter's weights (`dflash2/*`) are
-placed on rank 0 alone, which also holds the drafter's context state: the pending and prefill
-features and the DFlash rings of every StateImage. Rank 1's persistent layout omits all of them,
-and the StateImage mirror copies only rank 1's GDN and hidden components. The full-head proposal
-is rejected at load: the text output head is split by vocabulary across the ranks and
-`linear_topk` has a vocabulary-split form only for the optimized head, so `--lm-head-draft` is
-required. The optimized head `proposal/head` Q4 `[131072,5120]` and its `proposal/token_ids` split
-by rows into `[65536,5120]` / `[65536]` blocks (`load/sharding.cpp`). After the drafter's final
-norm, rank 1 receives the `[5120,K*B]` hidden through one `allreduce_sum` against zeros, each rank
-ranks its block (`ops::linear_topk_split`), packs its sixteen 64-bit keys as base-256 digits
-(`ops::topk_split_pack`), one more `allreduce_sum` gives rank 0 both lists and
-`ops::topk_split_merge` keeps the top sixteen (`execution::dflash2_candidates_split`,
-`execution/tp2/draft_split.cpp`). Each block row equals the whole head's row bit for bit and the keys
-carry global token IDs, so the candidates, scores and drafts are those of the whole head.
-`NINFER_TP_DRAFT_HEAD=primary` or `NINFER_TP_DRAFTER=primary` keeps the head whole on rank 0 for A/B
-runs; the startup log names the placement (`DFlash2 proposal head: split by vocabulary`).
+At `tp=2` DFlash2 splits the target ([Qwen3.5 model](qwen3_5-model.md#tensor-parallel-execution)),
+the drafter and the candidate ranking of the optimized proposal head; only the candidate selector
+stays on rank 0. `--lm-head-draft` is required: the text output head is split by vocabulary and
+`linear_topk` has a vocabulary-split form only for the optimized head. A drafter with
+full-attention layers is rejected (its paged KV would have no rank 1 mirror).
 
-Target features need no exchange. Each Text layer ends in an all-reduce that leaves the complete
-residual on both ranks, so the feature tap reads rank 0's residual after each captured layer, in
-prefill chunks and in verification, and only rank 0 appends to the draft context. One round:
+**Placement** (`load/sharding.cpp`). Every drafter layer splits like a Text layer: rank r holds
+query heads `[16 r, 16 r + 16)` of 32 and KV heads `[4 r, 4 r + 4)` of 8 of `attention/query` and
+`attention/{key,value}` (and of `attention/{context_key,context_value}`, which share those parents'
+rows), the matching input columns of `attention/output`, half of the `mlp/{gate,up}` rows and the
+matching `mlp/down` columns. The norms, both dynamic convolutions' `base_kernel` and
+`kernel_projection`, `feature_projection`, `context_norm` and `final_norm` are replicated, and
+`candidate_selector/*` is rank 0's. The optimized head `proposal/head` Q4 `[131072,5120]` and its
+`proposal/token_ids` split by rows into `[65536,5120]` / `[65536]` blocks.
+`NINFER_TP_DRAFTER=primary` keeps the whole drafter, its state and the head on rank 0 (the rank-0
+drafter of the first two-device port, with only the head split: rank 1 then receives the final
+hidden through one `allreduce_sum` against zeros); `NINFER_TP_DRAFT_HEAD=primary` keeps the head on
+rank 0. The startup log names both placements (`DFlash2 proposal head`, `DFlash2 drafter`).
+
+**Round** (`execution::dflash2_draft_round_tp2`, `execution/tp2/draft_tp2.inc`, one call from
+`dflash_decode_batch_body`). The residual is replicated and bit-identical on both ranks:
 
 1. Upload the ingress record to both ranks' decode frames.
-2. Rank 0: materialize the pending features, append the context, run the drafter layers; both
-   ranks rank the candidates of their head blocks (two exchanges); rank 0 selects K drafts.
-3. Record an event on rank 0; rank 1 waits on it and pulls the draft tokens into its frame.
-4. Both ranks prepare their verification ids and positions from their own frames.
-5. Both ranks verify their halves of the target with ReplaySSM records; rank 0 captures features
-   and gathers the complete logits.
-6. Rank 0 accepts sparsely and publishes the egress; rank 1 pulls the accepted counts and selects
-   and publishes its own accepted hidden.
+2. Each rank gathers its own pending target features and appends its context: the replicated
+   feature projection and context norm, then its four KV heads' context K/V into its own rings
+   (`ops::context_kv_materialize_head_block`). No exchange.
+3. Each layer: both ranks run the replicated norm and convolution prepare, then their query/key/value
+   shard (`ops::attn_input_proj_head_block`), `ops::rmsnorm_rope_head_block` and sliding-window
+   attention over their 16/4 heads and own rings (`ops::sliding_window_attention_head_block`); each
+   projects its heads through its `attention/output` columns into a BF16 partial, one
+   `allreduce_sum` adds the partials, and both ranks apply the convolution finish to the identical
+   sum (`ops::dynamic_grouped_conv_finish_add`). The MLP branch does the same with `linear`
+   gate|up, `silu_mul` and the `mlp/down` columns. Two exchanges per layer.
+4. Both ranks take the final norm; each ranks its head block (`ops::linear_topk_split`), packs its
+   sixteen 64-bit keys as base-256 digits (`ops::topk_split_pack`), one `allreduce_sum` gives rank 0
+   both lists and `ops::topk_split_merge` keeps the top sixteen (`execution::dflash2_candidates_split`).
+   Each block row equals the whole head's row bit for bit and the keys carry global token IDs, so the
+   candidates are those of the whole head over the same hidden.
+5. Rank 0 selects K drafts (`candidate_selector_path`); rank 1 pulls them after an event.
+6. Both ranks verify their halves of the target with ReplaySSM records and each captures its own
+   target features from its copy of the residual; rank 0 gathers the logits and accepts sparsely, and
+   rank 1 pulls the accepted counts and publishes its own accepted hidden.
+
+Eleven exchanges per round at K=7 (ten of `[5120,K+1,B]`, one of the packed keys). Within one mailbox
+slot (B=1) they run on the pinned-host mailbox; wider batches use the staged copies inside the same
+graph. The drafts are not bit-identical to a one-device drafter's: each row-parallel projection
+rounds its two partials to BF16 before the sum, and the MLP rounds gate and up to BF16 before
+`silu_mul` instead of the fused SwiGLU. The target, which decides, is unchanged.
+
+**State.** Both ranks hold the drafter's state: the DFlash rings of their KV heads in every
+StateImage (the StateImage mirror replays zeroing and copies, `copy_dflash_local` included), the
+prefill and the pending target features. Rank 1's features come from its own feature sink
+(`TextContext::set_peer_feature_sink`), fed in prefill chunks and verification; the prefill
+consumer, the round and the eager catch-up (`ProgramImpl::enqueue_dflash_context_append`) append
+rank 1's context beside rank 0's. Both ranks' persistent layouts are the same, so the planner's one
+reservation curve bounds both. Retained prefixes resume on both ranks through the mirrors.
 
 The commit folds both ranks' records with the same rows. Graph capture enrolls rank 1's stream in
 one two-device graph per profile; each topology class is budgeted 11 MiB on each rank
-(`tp2_dflash2_graph_class_allowance_bytes` in `core/tp2/device_tuning.h`). Retained prefixes resume as on one device, since no DFlash
-state is needed outside rank 0.
+(`tp2_dflash2_graph_class_allowance_bytes` in `core/tp2/device_tuning.h`).
 
 ## Execution flow
 

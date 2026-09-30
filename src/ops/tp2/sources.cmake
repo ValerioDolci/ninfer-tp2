@@ -38,7 +38,7 @@ target_sources(ninfer_ops PRIVATE
   "${CMAKE_CURRENT_LIST_DIR}/../linear_swiglu/tp2/nvfp4_linear_swiglu_half_plan.cpp"
   "${CMAKE_CURRENT_LIST_DIR}/../context_kv_materialize/tp2/materialize_shard_h4.cu"
   "${CMAKE_CURRENT_LIST_DIR}/../attn_input_proj/tp2/q8_dflash2_attn_input_shard_small_t.cu"
-  "${CMAKE_CURRENT_LIST_DIR}/../attn_input_proj/tp2/q8_dflash2_attn_input_shard_plan.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/../attn_input_proj/tp2/q8_dflash2_attn_input_head_block.cpp"
 )
 # Warp-specialized TMA kernels stay in the non-RDC archive, as upstream's (../CMakeLists.txt).
 target_sources(ninfer_nvfp4_non_rdc PRIVATE
