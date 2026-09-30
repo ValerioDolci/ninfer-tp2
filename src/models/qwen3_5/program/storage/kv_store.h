@@ -860,13 +860,13 @@ public:
 
     [[nodiscard]] std::uint32_t occupied() const noexcept { return capacity() - free_count_; }
 
-    [[nodiscard]] std::optional<KVAddressSpaceHandle> create_active(std::uint32_t entitlement,
-                                                                    std::int32_t execution_row) {
+    [[nodiscard]] std::optional<KVAddressSpaceHandle>
+    create_active(std::uint32_t entitlement, std::int32_t execution_row, cudaStream_t stream) {
         if (entitlement == 0 || entitlement > page_capacity_) { return std::nullopt; }
         std::optional<KVAddressSpaceHandle> handle = create_inactive();
         if (!handle) { return std::nullopt; }
         try {
-            activate(*handle, entitlement, execution_row);
+            activate(*handle, entitlement, execution_row, stream);
             return handle;
         } catch (...) {
             (void)release(*handle);
@@ -893,13 +893,13 @@ public:
     }
 
     void activate(KVAddressSpaceHandle handle, std::uint32_t entitlement,
-                  std::int32_t execution_row) {
+                  std::int32_t execution_row, cudaStream_t stream) {
         Address& address = require(handle);
         if (entitlement < address.page_count) {
             throw std::logic_error("KV address space is not activatable");
         }
         auto reservation = prepare_activation(handle, entitlement, execution_row);
-        commit_activation(std::move(reservation));
+        commit_activation(std::move(reservation), stream);
     }
 
     [[nodiscard]] KVActivationReservation
@@ -951,7 +951,7 @@ public:
         return activation.page_reservation_;
     }
 
-    void commit_activation(KVActivationReservation&& activation, cudaStream_t stream = nullptr) {
+    void commit_activation(KVActivationReservation&& activation, cudaStream_t stream) {
         if (activation.owner_ != this) {
             throw std::logic_error("KV activation reservation belongs to another store");
         }
@@ -1132,7 +1132,7 @@ public:
         pages_->physical_pool().resize_reservation(fork.page_reservation_, growth);
     }
 
-    void commit_prefix_fork(KVPrefixForkReservation&& fork, cudaStream_t stream = nullptr) {
+    void commit_prefix_fork(KVPrefixForkReservation&& fork, cudaStream_t stream) {
         require_prefix_fork(fork);
         Address& source                    = require(fork.source_);
         Address& destination               = require(fork.destination_);
@@ -1328,8 +1328,7 @@ public:
         return pages_->physical(*snapshot.tail_destination_);
     }
 
-    void commit_active_snapshot(KVActiveSnapshotReservation&& snapshot,
-                                cudaStream_t stream = nullptr) {
+    void commit_active_snapshot(KVActiveSnapshotReservation&& snapshot, cudaStream_t stream) {
         require_active_snapshot(snapshot);
         Address& source      = require_active(snapshot.source_);
         Address& destination = require(snapshot.destination_);
@@ -1438,7 +1437,7 @@ public:
     // Coverage is a lower bound. A speculative mapping may already extend beyond this stage's
     // needs; only an explicit truncate releases it, and commit_frontier publishes valid tokens.
     void ensure_mapped_to_tokens(KVAddressSpaceHandle handle, std::uint32_t tokens,
-                                 cudaStream_t stream = nullptr) {
+                                 cudaStream_t stream) {
         Address& address           = require_active(handle);
         const std::uint32_t target = pages_for_tokens(tokens);
         if (target > entitlement(address)) {
@@ -1843,7 +1842,7 @@ private:
         return memberships_[index * page_capacity_ + page];
     }
 
-    void publish_membership(const Address& address, cudaStream_t stream = nullptr) {
+    void publish_membership(const Address& address, cudaStream_t stream) {
         if (!address.row) { throw std::logic_error("KV address space has no execution row"); }
         publish_scratch_.clear();
         for (std::uint32_t page = 0; page < address.page_count; ++page) {
