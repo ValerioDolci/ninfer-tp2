@@ -26,6 +26,8 @@
 #include "ninfer/ops/allreduce.h"
 #include "ninfer/ops/linear_add.h"
 #include "ninfer/ops/linear_swiglu.h"
+#include "ninfer/ops/tp2/linear_add.h"
+#include "ninfer/ops/tp2/linear_swiglu.h"
 
 #include "core/device.h"
 #include "core/weight.h"

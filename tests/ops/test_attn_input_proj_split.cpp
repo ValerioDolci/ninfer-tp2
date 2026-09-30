@@ -20,6 +20,7 @@
 // reports 77 with fewer. The registry probe is host-only and runs first.
 #include "ninfer/ops/allreduce.h"
 #include "ninfer/ops/attn_input_proj.h"
+#include "ninfer/ops/tp2/attn_input_proj.h"
 
 #include "core/device.h"
 #include "core/weight.h"

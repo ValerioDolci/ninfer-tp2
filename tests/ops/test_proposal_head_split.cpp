@@ -22,6 +22,8 @@
 #include "ninfer/ops/argmax.h"
 #include "ninfer/ops/linear.h"
 #include "ninfer/ops/peer_mailbox.h"
+#include "ninfer/ops/tp2/argmax.h"
+#include "ninfer/ops/tp2/linear.h"
 
 #include "core/decode_graph.h"
 #include "core/device.h"

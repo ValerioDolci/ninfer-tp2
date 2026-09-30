@@ -29,6 +29,8 @@
 #include "ninfer/ops/causal_conv1d_silu.h"
 #include "ninfer/ops/gated_delta_net.h"
 #include "ninfer/ops/gated_rmsnorm.h"
+#include "ninfer/ops/tp2/gdn_gating_proj.h"
+#include "ninfer/ops/tp2/gdn_input_proj.h"
 
 #include "ops/gdn_criteria.h"
 #include "ops/gdn_ref.h"

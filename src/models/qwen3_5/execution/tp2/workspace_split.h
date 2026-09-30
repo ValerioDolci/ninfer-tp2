@@ -5,6 +5,7 @@
 
 #include "models/qwen3_5/execution/workspace.h"
 #include "ninfer/ops/argmax.h"
+#include "ninfer/ops/tp2/argmax.h"
 
 #include <cstdint>
 

@@ -4,6 +4,7 @@
 #include "models/qwen3_5/execution/tp2/linear_split.h"
 #include "ninfer/ops/attn_input_proj.h"
 #include "ninfer/ops/rope.h"
+#include "ninfer/ops/tp2/attn_input_proj.h"
 
 #include <array>
 #include <stdexcept>

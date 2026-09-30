@@ -3,6 +3,7 @@
 #include "core/device_scope.h"
 #include "models/qwen3_5/execution/tp2/linear_split.h"
 #include "ninfer/ops/argmax.h"
+#include "ninfer/ops/tp2/argmax.h"
 #include "ops/launcher/concat_rows.h"
 
 #include <cuda_runtime.h>

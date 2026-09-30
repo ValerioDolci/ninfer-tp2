@@ -1,11 +1,12 @@
-// Implements: include/ninfer/ops/argmax.h (argmax_split_pack, argmax_split_select)
+// Implements: include/ninfer/ops/tp2/argmax.h (argmax_split_pack, argmax_split_select)
 // Match: validated contiguous BF16 [R,T] logits with R <= kArgmaxSplitMaxRowsPerRank, I32 [T]
 // rows, BF16 [8,T] candidates.
 // Algorithm assumptions: one thread per column; a candidate is four base-256 digits, each an
 // integer BF16 represents exactly, so the summing exchange of the two ranks' disjoint digits is
 // exact.
 #include "ninfer/ops/argmax.h"
-#include "ops/launcher/argmax.h"
+#include "ninfer/ops/tp2/argmax.h"
+#include "ops/launcher/argmax_split.h"
 
 #include "core/device.h" // CUDA_CHECK
 #include "ops/common/math.h"

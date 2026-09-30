@@ -10,6 +10,9 @@
 #include "ninfer/ops/linear.h"
 #include "ninfer/ops/linear_add.h"
 #include "ninfer/ops/linear_swiglu.h"
+#include "ninfer/ops/tp2/linear.h"
+#include "ninfer/ops/tp2/linear_add.h"
+#include "ninfer/ops/tp2/linear_swiglu.h"
 
 #include <array>
 #include <stdexcept>

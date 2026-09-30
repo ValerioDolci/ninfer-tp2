@@ -4,6 +4,8 @@
 #include "models/qwen3_5/execution/tp2/linear_split.h"
 #include "ninfer/ops/gdn_gating_proj.h"
 #include "ninfer/ops/gdn_input_proj.h"
+#include "ninfer/ops/tp2/gdn_gating_proj.h"
+#include "ninfer/ops/tp2/gdn_input_proj.h"
 
 #include <algorithm>
 #include <array>

@@ -16,6 +16,7 @@
 // registry probe is host-only and runs first.
 #include "ninfer/ops/allreduce.h"
 #include "ninfer/ops/linear.h"
+#include "ninfer/ops/tp2/linear.h"
 
 #include "core/device.h"
 #include "core/weight.h"
