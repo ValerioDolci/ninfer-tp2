@@ -3,6 +3,7 @@
 #include "ops/softmax_attention/dense/causal_cache/int8/plan.h"
 #include "ops/softmax_attention/dense/causal_cache/int8/template_launch.cuh"
 #include "ops/kv_cache/append/launch.h"
+#include <stdexcept>
 
 namespace ninfer::ops::detail {
 namespace {
@@ -64,8 +65,10 @@ void execute_grouped(const Tensor& q, const Tensor& positions, float scale,
     const auto p = make_causal_operands(q, positions, out, scale, plan.envelope.max_visible_keys);
     if (plan.query_heads == 24)
         grouped_instance<CausalD256H24Kv4>(p, view, input, plan.partition, partial.view(), stream);
-    else
+    else if (plan.query_heads == 16)
         grouped_instance<CausalD256H16Kv2>(p, view, input, plan.partition, partial.view(), stream);
+    else
+        throw std::invalid_argument("INT8 attention: unsupported head geometry");
 }
 
 template <class G, int Tokens>
@@ -101,16 +104,20 @@ void execute_parallel(const CausalAttentionOperands& p, Int8KvReadView cache,
     if (plan.query_heads == 24)
         parallel_grouped<CausalD256H24Kv4, Int8KvCausalPlan::kTokenTile>(p, cache, plan.partition,
                                                                          partial.view(), stream);
-    else
+    else if (plan.query_heads == 16)
         parallel_grouped<CausalD256H16Kv2, Int8KvCausalPlan::kTokenTile>(p, cache, plan.partition,
                                                                          partial.view(), stream);
+    else
+        throw std::invalid_argument("INT8 attention: unsupported head geometry");
 }
 
 void tiled(const CausalAttentionOperands& p, Int8KvReadView cache, cudaStream_t stream) {
     if (p.query_heads == 24)
         launch_int8_kv_tiled_mma<CausalD256H24Kv4, Int8KvTiledInstance>(p, cache, stream);
-    else
+    else if (p.query_heads == 16)
         launch_int8_kv_tiled_mma<CausalD256H16Kv2, Int8KvTiledInstance>(p, cache, stream);
+    else
+        throw std::invalid_argument("INT8 attention: unsupported head geometry");
 }
 
 } // namespace
