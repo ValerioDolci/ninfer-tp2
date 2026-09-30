@@ -10,7 +10,7 @@ constexpr int kGroupedPrefillMaxWidth = 256;
 
 Int8KvCausalPlan make_int8_kv_causal_plan(int heads, int width, int batch,
                                           CausalAttentionExecutionEnvelope envelope) {
-    if ((heads != 24 && heads != 16) || width < 1 || batch < 1 || batch > 8 ||
+    if ((heads != 24 && heads != 16 && heads != 12) || width < 1 || batch < 1 || batch > 8 ||
         (batch > 1 && width > 16) || envelope.min_visible_keys == 0 ||
         envelope.min_visible_keys > envelope.max_visible_keys ||
         envelope.max_visible_keys > kCausalAttentionMaximumVisibleKeys)
@@ -24,7 +24,9 @@ Int8KvCausalPlan make_int8_kv_causal_plan(int heads, int width, int batch,
     const int independent_tiles = batch * (heads == 24 ? 4 : 2) * tiles;
     constexpr int sms           = kCausalAttentionSmCount;
     const int wave_ctas         = (sms / independent_tiles) * independent_tiles;
-    const int budget = heads == 24 || width <= 4 || wave_ctas < sms * 9 / 10 ? 2 * sms : sms;
+    // 12/2, one device's half of 24/4 at tp 2, has 24/4's group of six and therefore its CTA
+    // shape: it takes 24/4's wave budget and split granularity (not re-measured at 12/2).
+    const int budget = heads != 16 || width <= 4 || wave_ctas < sms * 9 / 10 ? 2 * sms : sms;
     CausalKvPartition partition{
         1, std::clamp(budget / independent_tiles, 1, CausalKvPartition::kMaxSplits)};
     // Bound partial traffic by keeping enough KV work in each split.
