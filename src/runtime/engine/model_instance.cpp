@@ -19,6 +19,9 @@ namespace ninfer::runtime {
 namespace {
 using Clock = std::chrono::steady_clock;
 
+// The Engine option checks at tp 2 (tp2/model_instance_tp2.inc).
+void validate_tensor_parallel_options(const EngineOptions& options);
+
 void validate_options(const EngineOptions& options) {
     if (options.artifact_path.empty()) {
         throw std::invalid_argument("Engine artifact_path must not be empty");
@@ -74,33 +77,7 @@ void validate_options(const EngineOptions& options) {
     if (options.media_preprocess_threads > 64) {
         throw std::invalid_argument("Engine media_preprocess_threads must be in [0,64]");
     }
-    if (options.tp == 2) {
-        // Rejected before the artifact is read: the two-device schedule covers text and
-        // multimodal prefill, the ordinary decode round, the MTP round and the DFlash2 round of
-        // the dense Text model, and causal scoring over its text prefill, only
-        // (models/qwen3_5/execution/text.h).
-        if (options.speculative.backend == SpeculativeBackend::DFlash) {
-            throw std::invalid_argument("Engine tp 2 does not support DFlash speculative decoding");
-        }
-        // The DFlash2 drafter runs whole on rank 0 and ranks its candidates over one complete
-        // proposal head; the full output head is split by vocabulary across the ranks, so only
-        // the optimized head, which rank 0 holds whole, can serve it.
-        if (options.speculative.backend == SpeculativeBackend::DFlash2 &&
-            options.speculative.proposal_head != ProposalHead::Optimized) {
-            throw std::invalid_argument(
-                "Engine tp 2 DFlash2 requires the optimized proposal head (--lm-head-draft)");
-        }
-        if (options.kv_cache != KvCacheStorage::BFloat16 &&
-            options.kv_cache != KvCacheStorage::Int8Group64) {
-            throw std::invalid_argument("Engine tp 2 supports only bf16 and int8 KV caches");
-        }
-        if (options.context_cache.host_state_slots != 0 ||
-            options.context_cache.host_kv_capacity_bytes != 0) {
-            throw std::invalid_argument(
-                "Engine tp 2 requires context_cache host_state_slots and host_kv_capacity_bytes "
-                "of 0: rank 1's KV and state have no Host tier");
-        }
-    }
+    if (options.tp == 2) { validate_tensor_parallel_options(options); }
 }
 
 std::size_t free_device_bytes(int device) {
@@ -396,3 +373,5 @@ ConstructedModel construct_model(const EngineOptions& options, ExecutionContext&
 }
 
 } // namespace ninfer::runtime
+
+#include "runtime/engine/tp2/model_instance_tp2.inc"
