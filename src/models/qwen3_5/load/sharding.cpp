@@ -234,10 +234,32 @@ bool split_proposal_rows(std::uint64_t rows, const Config& config, const LoadOpt
 // attention heads and MLP rows split like a Text block's, with the query, key and value heads of
 // each rank in contiguous blocks; the convolution kernels, the norms and the feature projection are
 // replicated (every rank computes the same context and conv coefficients from its own copy of the
-// replicated residual); the candidate selector stays on rank 0.
+// replicated residual); the candidate selector sits on one rank (selector_rank()).
 bool split_dflash2_drafter(const Config& config, const LoadOptions& options) {
     return options.dflash2() && options.tp > 1 && !drafter_primary_requested() && config.draft &&
            config.draft->dflash2 && config.draft->full_layer_count() == 0;
+}
+
+// NINFER_TP_SELECTOR=primary keeps the split drafter's candidate selector on rank 0, the placement
+// before it moved to rank 1, for A/B runs on one binary.
+bool selector_primary_requested() {
+    const char* value = std::getenv("NINFER_TP_SELECTOR");
+    return value != nullptr && std::string_view(value) == "primary";
+}
+
+// The rank of the split drafter's candidate selector (hidden projection and codebooks, 257 MB for
+// Qwen3.8-27B): rank 1, which holds no Vision tower and so has the more free memory after the
+// weights, leaving rank 0 (the one that bounds the KV capacity) that much more context. Both ranks
+// rank the candidates of their proposal head blocks, and the selecting rank sends the drafts and
+// their distributions to the other (execution/tp2/draft_tp2.inc). Rank 0 with the Vision tower on
+// rank 1, with the proposal head whole on rank 0 (NINFER_TP_DRAFT_HEAD=primary: only rank 0 holds
+// the candidates), or with NINFER_TP_SELECTOR=primary. The Program rejects a selector on rank 1
+// over a proposal head that did not split (startup_tp2.inc).
+int selector_rank(const LoadOptions& options) {
+    const bool vision_on_rank1 = options.vision && options.vision_rank == 1;
+    return vision_on_rank1 || proposal_head_primary_requested() || selector_primary_requested()
+               ? 0
+               : 1;
 }
 
 LogicalShard draft_block_shard(std::string_view name, std::string_view leaf,
@@ -270,7 +292,8 @@ LogicalShard draft_block_shard(std::string_view name, std::string_view leaf,
 }
 
 LogicalShard drafter_shard(std::string_view name, const artifact::Shape& shape,
-                           const Config& config, int tp) {
+                           const Config& config, const LoadOptions& options) {
+    const int tp = options.tp;
     constexpr std::string_view layers = "dflash2/layers/";
     if (name.starts_with(layers)) {
         const auto slash = name.find('/', layers.size());
@@ -282,7 +305,10 @@ LogicalShard drafter_shard(std::string_view name, const artifact::Shape& shape,
         name == "dflash2/final_norm") {
         return whole(ShardAxis::Replicated);
     }
-    if (in_component(name, "dflash2/candidate_selector")) { return whole(ShardAxis::PrimaryOnly); }
+    if (in_component(name, "dflash2/candidate_selector")) {
+        return selector_rank(options) == 0 ? whole(ShardAxis::PrimaryOnly)
+                                           : whole(ShardAxis::SingleDevice, 1);
+    }
     reject(name, "has no DFlash2 drafter placement for this parameter");
 }
 
@@ -311,7 +337,7 @@ LogicalShard shard_rule(std::string_view name, const artifact::Shape& shape, con
         return even(name, ShardAxis::Rows, rows, rows, tp);
     }
     if (in_component(name, "dflash2") && split_dflash2_drafter(config, options)) {
-        return drafter_shard(name, shape, config, tp);
+        return drafter_shard(name, shape, config, options);
     }
     if (in_component(name, "dflash") || in_component(name, "dflash2") ||
         in_component(name, "proposal")) {

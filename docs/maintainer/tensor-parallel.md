@@ -87,7 +87,7 @@ hidden/residual axis is never split.
 | `dflash2/layers/*/attention/query`, `…/{key,value,context_key,context_value}` | Rows, by the drafter's 32 query / 8 KV heads (context key/value share the key/value parents' rows) | packed Q\|K\|V Q8 `[6144,5120]` → `[3072,5120]` (16 Q, 4 KV heads of 128) |
 | `dflash2/layers/*/attention/output`, `…/mlp/{gate,up}`, `…/mlp/down` | Columns by query heads, Rows, Columns | `[5120,4096]` → `[5120,2048]`, gate\|up `[34816,5120]` → `[17408,5120]`, `[5120,17408]` → `[5120,8704]` |
 | `dflash2/` norms, `…/{attention,mlp}_conv/*`, `feature_projection`, `context_norm`, `final_norm` | Replicated | whole on both ranks |
-| `dflash2/candidate_selector/*` | PrimaryOnly | whole on rank 0 |
+| `dflash2/candidate_selector/*` | SingleDevice(1); PrimaryOnly with Vision on rank 1, `NINFER_TP_DRAFT_HEAD=primary` or `NINFER_TP_SELECTOR=primary` | whole on rank 1 (257 MB for Qwen3.8-27B) |
 | `dflash/*`, `dflash2/*` with `NINFER_TP_DRAFTER=primary`, `proposal/*` otherwise | PrimaryOnly | whole on rank 0 |
 
 A shard is a standalone weight of the parent's format and layout with one axis narrowed, never a
@@ -460,7 +460,7 @@ automatic headroom is the fixed `kDefaultKvCapacityHeadroomBytes` (1 GiB), subtr
 that bottleneck budget as at tp 1; an explicit capacity carries none. Under DFlash2 rank 1 is still
 budgeted for rank 0's drafter state with `NINFER_TP_DRAFTER=primary`; with the split drafter both
 ranks hold the same drafter state, so the one layout is exact for both, and rank 0, which also holds
-the selector and Vision, is normally the bottleneck.
+Vision, is normally the bottleneck; the candidate selector sits on rank 1 for that reason.
 
 ## 7. Speculative decoding at tp 2
 
@@ -507,20 +507,29 @@ The prompt MTP alignment runs on both ranks, rank 1 keeping its final-normed chu
 `prefill_hidden`, and rank 1 keeps its own RoPE delta (`TpExecution::rope_delta`).
 
 **DFlash2.** The target, the drafter and the optimized proposal head are split; the candidate
-selector stays on rank 0. Each drafter layer runs like a Text layer, rank r with its 16/4 heads and
+selector is rank 1's (rank 0's with Vision on rank 1, `NINFER_TP_DRAFT_HEAD=primary` or
+`NINFER_TP_SELECTOR=primary`). Each drafter layer runs like a Text layer, rank r with its 16/4 heads and
 MLP half, closing each branch with a row-parallel projection whose all-reduce precedes the dynamic
 convolution's finish on both ranks, so the residual stays replicated (ten exchanges per round at
 K=7). Both ranks keep the drafter's state (their KV heads' rings, prefill and pending features), each
 feature tap reading its own copy of the replicated residual, so features need no exchange. The head
 ranks its candidates by vocabulary blocks: each rank takes the top sixteen of its `[65536,5120]` block
-(`ops::linear_topk_split`) and one all-reduce of the packed 64-bit keys gives rank 0 the exact top
-sixteen of the whole head (`execution::dflash2_candidates_split`). `NINFER_TP_DRAFTER=primary` keeps
+(`ops::linear_topk_split`) and one all-reduce of the packed 64-bit keys gives both ranks the exact
+top sixteen of the whole head (`execution::dflash2_candidates_split`), which each merges. `NINFER_TP_DRAFTER=primary` keeps
 the drafter whole on rank 0 (rank 1 then receives the final hidden through an all-reduce against
 zeros for the split head) and `NINFER_TP_DRAFT_HEAD=primary` the head. In a round
 (`dflash_decode_batch_body` in [`draft.cpp`](../../src/models/qwen3_5/execution/draft.cpp) and
-`execution/tp2/draft_tp2.inc`) both ranks append their context and draft, rank 0 selects, rank 1
-pulls the draft tokens after `inputs_ready(0)`, both verify, rank 0 accepts and rank 1 pulls the
-accepted counts. `--lm-head-draft` is mandatory at
+`execution/tp2/draft_tp2.inc`) both ranks append their context and draft, rank 1 selects (reading
+temperature and seed from its copy of the ingress record), rank 0 pulls the draft tokens and their
+distributions `proposal_q` after `inputs_ready(1)` (`dflash2_share_drafts_tp2`; with the selector on
+rank 0 rank 1 pulls the draft tokens after `inputs_ready(0)`), both verify, rank 0 accepts and rank 1
+pulls the accepted counts. The selector on rank 1 frees its 257 MB on rank 0: under the production
+options (Vision on rank 0, `--max-concurrency 4`, INT8 KV, `--device-state-slots 8`) the largest
+context grows from 233.3k to 248.5k tokens (260.0k with `--device-state-slots 6`; 262,144 stays
+35 MB short). Drafts, texts and acceptance are those of the selector on rank 0, bit for bit; the
+pull of the drafts and of `proposal_q` onto rank 0's critical path costs 0.09 ms per round at one
+request (+0.5 %) and about 0.2 ms at two to four (+1.0 %) on two RTX 5070 Ti
+(`NINFER_TP_SELECTOR=primary` restores the selector on rank 0). `--lm-head-draft` is mandatory at
 tp 2: the full output head is split by vocabulary and candidate ranking has a vocabulary-split form
 only for the optimized head. The Engine, `plan_load` and the planner each reject the other case. A drafter with
 full-attention layers is also rejected, since its paged KV would have no rank 1 mirror while

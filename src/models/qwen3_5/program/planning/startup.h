@@ -91,6 +91,9 @@ struct SequencePlanningInputs {
     // The Parameters of the rank that holds the Vision tower (`features.vision_rank`): rank 0's
     // `parameters` except at tp 2 with the tower on rank 1. Read only with Vision.
     const execution::Parameters* vision_parameters = nullptr;
+    // Rank 1's Parameters at tp 2 (null at tp 1): the split DFlash2 drafter's candidate selector
+    // may be rank 1's alone.
+    const execution::Parameters* peer_parameters = nullptr;
     // Merged-token ceiling of one Vision item; the encode workspace is planned for it.
     std::uint32_t max_vision_item_tokens    = static_cast<std::uint32_t>(kMaximumVisionItemTokens);
     std::uint32_t capacity                  = 0;
@@ -120,6 +123,7 @@ namespace ninfer::models::qwen3_5::detail {
 struct SequencePlanImpl {
     const execution::Parameters* parameters        = nullptr;
     const execution::Parameters* vision_parameters = nullptr;
+    const execution::Parameters* peer_parameters   = nullptr;
     std::uint32_t max_vision_item_tokens           = 0;
     std::uint32_t capacity                  = 0;
     std::uint32_t kv_capacity               = 0;

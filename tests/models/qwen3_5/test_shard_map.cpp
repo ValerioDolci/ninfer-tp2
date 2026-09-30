@@ -157,7 +157,8 @@ void logical_policy_27b() {
     {
         // The DFlash2 drafter splits under DFlash2 (NINFER_TP_DRAFTER=primary keeps it on rank 0):
         // attention by its 32/8 heads, MLP rows and down columns, conv kernels, norms and the
-        // feature projection replicated, the selector on rank 0.
+        // feature projection replicated, the candidate selector on rank 1 (rank 0 with Vision on
+        // rank 1, NINFER_TP_DRAFT_HEAD=primary or NINFER_TP_SELECTOR=primary).
         auto drafted  = config;
         auto& draft   = drafted.draft.emplace();
         draft.attention         = qwen::AttentionConfig{32, 8, 128};
@@ -192,8 +193,22 @@ void logical_policy_27b() {
              {"dflash2/feature_projection", "dflash2/context_norm", "dflash2/final_norm"}) {
             expect(drafted, name, {h}, ShardAxis::Replicated, {}, 0, dflash2);
         }
-        expect(drafted, "dflash2/candidate_selector/successor_codebook", {vocab, 256},
-               ShardAxis::PrimaryOnly, {}, 0, dflash2);
+        for (const auto* name : {"dflash2/candidate_selector/successor_codebook",
+                                 "dflash2/candidate_selector/hidden_projection"}) {
+            expect(drafted, name, {vocab, 256}, ShardAxis::SingleDevice, {}, 1, dflash2);
+            expect(drafted, name, {vocab, 256}, ShardAxis::SingleDevice, {}, 1,
+                   {.vision = true, .speculative = SpeculativeBackend::DFlash2, .tp = 2});
+            expect(drafted, name, {vocab, 256}, ShardAxis::PrimaryOnly, {}, 0,
+                   {.vision        = true,
+                    .speculative   = SpeculativeBackend::DFlash2,
+                    .tp            = 2,
+                    .vision_rank   = 1});
+            for (const auto* variable : {"NINFER_TP_SELECTOR", "NINFER_TP_DRAFT_HEAD"}) {
+                ::setenv(variable, "primary", 1);
+                expect(drafted, name, {vocab, 256}, ShardAxis::PrimaryOnly, {}, 0, dflash2);
+                ::unsetenv(variable);
+            }
+        }
         // Under MTP, or with NINFER_TP_DRAFTER=primary, the drafter stays whole on rank 0.
         expect(drafted, d + "mlp/gate", {17408, h}, ShardAxis::PrimaryOnly, {}, 0,
                {.speculative = SpeculativeBackend::Mtp, .tp = 2});

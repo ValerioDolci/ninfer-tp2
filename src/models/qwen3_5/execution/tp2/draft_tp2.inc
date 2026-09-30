@@ -178,42 +178,68 @@ void propose_dflash2_batch_tp2(DFlashBatchContext& state, int batch, int k,
                                core.device.stream);
     });
 
-    // Candidates: both ranks rank their head blocks, rank 0 merges; the selector is rank 0's.
-    const ScopedCurrentDevice rank0(ec.dev[0]->device);
-    auto& work                     = state.execution.work;
-    const cudaStream_t stream      = state.execution.device.stream;
-    const DraftParameters& weights = *state.execution.parameters.draft;
-    qwen3_5::DFlashDecodeState& frame = state.frame;
-    Tensor anchors    = frame.anchors.slice(0, 0, batch);
-    Tensor frontiers  = frame.execution_frontiers.slice(0, 0, batch);
-    Tensor candidates = frame.candidate_ids.slice(2, 0, batch);
-    Tensor ids_flat   = candidates.view({dimension(config.dflash2->selector_top_k), mask_columns});
-    Tensor scores =
-        work.alloc(DType::FP32, {dimension(config.dflash2->selector_top_k), mask_columns});
+    // Candidates: both ranks rank their head blocks. The rank that holds the candidate selector
+    // (dflash2_selector_rank) selects into its frame; with the selector on rank 1 both ranks merge
+    // the candidates, since acceptance on rank 0 reads them.
+    const std::size_t selecting = dflash2_selector_rank(state.execution.parameters);
     const ProposalParameters& head0 = *state.execution.parameters.proposal;
+    if (selecting == 1 && (!head0.split() || ranks[1].frame->candidate_ids.data == nullptr ||
+                           ranks[1].frame->proposal_q.data == nullptr)) {
+        throw std::logic_error(
+            "DFlash2 tp2: a candidate selector on rank 1 needs the split head and rank 1's "
+            "candidate and proposal buffers");
+    }
+    const std::int32_t top_k = dimension(config.dflash2->selector_top_k);
+    std::array<Tensor, 2> candidates;
+    std::array<Tensor, 2> ids;
+    std::array<Tensor, 2> scores;
+    for (std::size_t r = 0; r < 2; ++r) {
+        candidates[r] = ranks[r].frame->candidate_ids.slice(2, 0, batch);
+        ids[r]        = candidates[r].view({top_k, mask_columns});
+    }
+    scores[0] = state.execution.work.alloc(DType::FP32, {top_k, mask_columns});
+    if (selecting == 1) {
+        scores[1] = ranks[1].execution->work.alloc(DType::FP32, {top_k, mask_columns});
+    }
     if (head0.split()) {
         dflash2_candidates_split(final_hidden, {&head0, &*ranks[1].execution->parameters.proposal},
-                                 false, ids_flat, scores,
-                                 {&work, &ranks[1].execution->work}, ec, *tp.events);
-    } else if (head0.token_ids) {
-        ops::linear_topk(final_hidden[0], head0.head.weight, *head0.token_ids, ids_flat, scores,
-                         work, stream);
+                                 false, ids[0], scores[0],
+                                 {&state.execution.work, &ranks[1].execution->work}, ec,
+                                 *tp.events, selecting == 1 ? &ids[1] : nullptr,
+                                 selecting == 1 ? &scores[1] : nullptr);
     } else {
-        ops::linear_topk(final_hidden[0], head0.head.weight,
-                         dimension(state.execution.parameters.model.resources().public_token_count),
-                         ids_flat, scores, work, stream);
+        const ScopedCurrentDevice rank0(ec.dev[0]->device);
+        const cudaStream_t stream = state.execution.device.stream;
+        if (head0.token_ids) {
+            ops::linear_topk(final_hidden[0], head0.head.weight, *head0.token_ids, ids[0],
+                             scores[0], state.execution.work, stream);
+        } else {
+            ops::linear_topk(
+                final_hidden[0], head0.head.weight,
+                dimension(state.execution.parameters.model.resources().public_token_count), ids[0],
+                scores[0], state.execution.work, stream);
+        }
     }
-    Tensor projected =
-        work.alloc(DType::BF16, {dimension(config.dflash2->selector_rank), mask_columns});
-    project(final_hidden[0], weights.selector->hidden_projection, projected, work, stream);
-    Tensor drafts     = frame.draft_tokens.slice(1, 0, batch);
-    Tensor proposal_q = frame.proposal_q.slice(2, 0, batch);
-    ops::candidate_selector_path(
-        candidates, scores.view({dimension(config.dflash2->selector_top_k), k, batch}),
-        projected.view({dimension(config.dflash2->selector_rank), k, batch}), anchors,
-        weights.selector->predecessor_codebook, weights.selector->successor_codebook, frontiers,
-        frame.sampling, drafts, proposal_q, work, stream);
-    work.reset();
+    {
+        const ScopedCurrentDevice owner(ec.dev[selecting]->device);
+        ExecutionCore& core               = *ranks[selecting].execution;
+        qwen3_5::DFlashDecodeState& frame = *ranks[selecting].frame;
+        const SelectorParameters& selector = *core.parameters.draft->selector;
+        auto& work                = core.work;
+        const cudaStream_t stream = core.device.stream;
+        Tensor projected =
+            work.alloc(DType::BF16, {dimension(config.dflash2->selector_rank), mask_columns});
+        project(final_hidden[selecting], selector.hidden_projection, projected, work, stream);
+        Tensor drafts     = frame.draft_tokens.slice(1, 0, batch);
+        Tensor proposal_q = frame.proposal_q.slice(2, 0, batch);
+        ops::candidate_selector_path(
+            candidates[selecting], scores[selecting].view({top_k, k, batch}),
+            projected.view({dimension(config.dflash2->selector_rank), k, batch}),
+            frame.anchors.slice(0, 0, batch), selector.predecessor_codebook,
+            selector.successor_codebook, frame.execution_frontiers.slice(0, 0, batch),
+            frame.sampling, drafts, proposal_q, work, stream);
+    }
+    state.execution.work.reset();
     ranks[1].execution->work.reset();
 }
 
@@ -224,6 +250,58 @@ bool dflash2_drafter_split(const Parameters& parameters) {
     const auto& draft = parameters.model.config().draft;
     return draft && parameters.draft->layers.front().context_key.weight.n <
                         static_cast<std::int32_t>(draft->attention.key_width());
+}
+
+std::size_t dflash2_selector_rank(const Parameters& rank0) {
+    return rank0.draft && rank0.draft->selector ? 0U : 1U;
+}
+
+void dflash2_share_drafts_tp2(DFlashBatchContext& state, std::int32_t batch_size) {
+    const TpExecution* tp = state.execution.tp;
+    if (tp == nullptr || state.peer_frame == nullptr) {
+        throw std::logic_error("DFlash2 tp2 drafts need rank 1's frame");
+    }
+    const ExecutionContext& ec       = *tp->execution;
+    const ops::PeerEvents& events    = *tp->events;
+    qwen3_5::DFlashDecodeState& peer = *state.peer_frame;
+    const std::array<qwen3_5::DFlashDecodeState*, 2> frames{&state.frame, &peer};
+    // The selecting rank's drafts (with a selector on rank 1 also their distributions, which rank
+    // 0's acceptance reads) reach the other rank through one pull each, ordered after the proposal
+    // by a cross-device event, as the collectives' transfers are; nothing writes them again this
+    // round.
+    const bool from_peer =
+        tp->dflash != nullptr && dflash2_selector_rank(state.execution.parameters) == 1;
+    const std::size_t source = from_peer ? 1U : 0U;
+    const std::size_t target = 1U - source;
+    const ScopedCurrentDevice restore;
+    ScopedCurrentDevice::select(ec.dev[source]->device);
+    CUDA_CHECK(
+        cudaEventRecord(events.inputs_ready(static_cast<int>(source)), ec.dev[source]->stream));
+    ScopedCurrentDevice::select(ec.dev[target]->device);
+    const cudaStream_t stream = ec.dev[target]->stream;
+    CUDA_CHECK(cudaStreamWaitEvent(stream, events.inputs_ready(static_cast<int>(source)), 0));
+    const auto pull = [&](const Tensor& to, const Tensor& from) {
+        CUDA_CHECK(cudaMemcpyAsync(to.data, from.data, from.bytes(), cudaMemcpyDeviceToDevice,
+                                   stream));
+    };
+    pull(frames[target]->draft_tokens.slice(1, 0, batch_size),
+         frames[source]->draft_tokens.slice(1, 0, batch_size));
+    if (from_peer) {
+        if (state.frame.proposal_q.data == nullptr || peer.proposal_q.data == nullptr) {
+            throw std::logic_error("DFlash2 tp2: a selector on rank 1 needs proposal_q on both "
+                                   "ranks");
+        }
+        pull(state.frame.proposal_q.slice(2, 0, batch_size),
+             peer.proposal_q.slice(2, 0, batch_size));
+    }
+    // Rank 1 derives its verification inputs from its drafts with the same Op as rank 0.
+    ScopedCurrentDevice::select(ec.dev[1]->device);
+    Tensor verify_ids = peer.verify_ids.slice(1, 0, batch_size);
+    Tensor positions  = peer.verify_positions.slice(1, 0, batch_size);
+    ops::speculative_prepare_verify_inputs(
+        peer.anchors.slice(0, 0, batch_size), peer.draft_tokens.slice(1, 0, batch_size),
+        peer.execution_frontiers.slice(0, 0, batch_size),
+        peer.proposal_extents.slice(0, 0, batch_size), verify_ids, positions, ec.dev[1]->stream);
 }
 
 void dflash2_draft_round_tp2(DFlashBatchContext& state, std::int32_t batch_size, std::uint32_t k,

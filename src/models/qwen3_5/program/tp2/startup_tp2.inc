@@ -28,8 +28,9 @@ bool dflash2_drafter_split_tp2(const SequencePlanImpl& plan) {
 
 // One rank's proposal of the split drafter over `batch` rows of `width` masked-block columns, in the
 // allocation order of execution/tp2/draft_tp2.inc (propose_dflash2_batch_tp2). Both ranks run the
-// same layers at their shard shapes; rank 0 also ranks with the split head and selects, which rank 1
-// does not, so the plan is rank 0's and bounds rank 1's.
+// same layers at their shard shapes and rank with their head blocks; the selecting rank (rank 1 by
+// default, load/sharding.cpp) also projects and selects, so the plan includes that step and bounds
+// both ranks.
 std::size_t dflash_proposal_workspace_split(const SequencePlanImpl& plan, std::int32_t width,
                                             std::int32_t batch) {
     const auto& parameters      = *plan.parameters;
@@ -81,8 +82,15 @@ std::size_t dflash_proposal_workspace_split(const SequencePlanImpl& plan, std::i
                                 : ops::linear_topk_workspace_capacity_bytes(
                                       head.head.weight.qtype, head.head.weight.n,
                                       head.head.weight.k, mask, mask));
+    // The selecting rank's projection (rank 1's with the candidate selector there).
+    const execution::Parameters& selecting =
+        parameters.draft->selector || plan.peer_parameters == nullptr ? parameters
+                                                                      : *plan.peer_parameters;
+    if (!selecting.draft || !selecting.draft->selector) {
+        throw std::logic_error("tensor-parallel DFlash2 planning found no candidate selector");
+    }
     reserve_matrix(layout, DType::BF16, dimension(draft.dflash2->selector_rank), mask);
-    reserve_linear(layout, parameters.draft->selector->hidden_projection, mask, mask);
+    reserve_linear(layout, selecting.draft->selector->hidden_projection, mask, mask);
     reserve_scratch(layout,
                     ops::candidate_selector_path_workspace_capacity_bytes(drafts, drafts, batch,
                                                                           batch));
@@ -457,6 +465,15 @@ void validate_tensor_parallel_options(const execution::Parameters& parameters,
             options.context_cache.host_kv_capacity_bytes != 0) {
             throw std::invalid_argument("tensor-parallel execution requires Host state slots and "
                                         "Host KV capacity of 0");
+        }
+        // A candidate selector on rank 1 selects among the candidates of the split proposal head,
+        // which both ranks merge; a head whole on rank 0 leaves rank 1 without them.
+        if (options.speculative.backend == SpeculativeBackend::DFlash2 && peer_parameters->draft &&
+            peer_parameters->draft->selector &&
+            (!parameters.proposal || !parameters.proposal->split())) {
+            throw std::invalid_argument(
+                "tensor-parallel DFlash2: the candidate selector on rank 1 requires the "
+                "vocabulary-split proposal head (set NINFER_TP_SELECTOR=primary)");
         }
         // Rejects the MoE FFN and extents the width does not divide.
         (void)execution::shard_text_config(parameters.model.config().text, options.tp);

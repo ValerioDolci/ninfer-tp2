@@ -35,9 +35,21 @@ struct DFlashPeerDrafter {
 // the drafter layers; the attention output and MLP down projections are row-parallel, summed by
 // one allreduce_sum each, after which both ranks apply the dynamic convolution's finish to the
 // identical sum. Both ranks then rank the candidates of their proposal head blocks
-// (dflash2_candidates_split, no broadcast) and rank 0 selects the drafts into `state.frame`.
+// (dflash2_candidates_split, no broadcast), and the rank that holds the candidate selector
+// (load/sharding.cpp: rank 1 by default) selects the drafts and their distributions into its
+// frame; dflash2_share_drafts_tp2 then gives them to the other rank.
 void dflash2_draft_round_tp2(DFlashBatchContext& state, std::int32_t batch_size, std::uint32_t k,
                              DFlashEnvelopes envelopes);
+
+// The rank that holds the split drafter's candidate selector (load/sharding.cpp), read from rank 0's
+// Parameters: 0 when they hold it, else 1.
+[[nodiscard]] std::size_t dflash2_selector_rank(const Parameters& rank0);
+
+// After a DFlash2 round's proposal at tp 2: the selecting rank's draft tokens reach the other rank
+// (rank 0 -> 1 when rank 0 selects, which covers the drafter on rank 0 alone; rank 1 -> 0 with the
+// selector on rank 1, together with the proposal distributions rank 0's acceptance reads), and rank
+// 1 derives its verification inputs from its drafts. Rank 0 derives its own afterwards.
+void dflash2_share_drafts_tp2(DFlashBatchContext& state, std::int32_t batch_size);
 
 // The split drafter's eager context catch-up on rank 1 (ProgramImpl::enqueue_dflash_context_append
 // does rank 0's): uploads `host_ingress` to rank 1's decode frame, gathers rank 1's pending
@@ -69,12 +81,15 @@ dflash_peer_prefill_sink(DFlashPeerDrafter& peer, qwen3_5::DFlashPrefillIngress*
 // FP32 combine of x and +0 returns x (a -0 becomes +0, which no product or sum can tell apart);
 // rank 0's `hidden[0]` is rewritten in place with the same values. Without it both ranks already
 // hold the same hidden. Rank r's scratch comes from `workspace[r]`, which must hold
-// dflash2_candidates_split_workspace_bytes(M, broadcast).
+// dflash2_candidates_split_workspace_bytes(M, broadcast). With `peer_ids` and `peer_scores` (rank
+// 1's tensors of the same shapes), rank 1 merges the same union into them as well, for a candidate
+// selector on rank 1.
 void dflash2_candidates_split(const std::array<Tensor, 2>& hidden,
                               const std::array<const ProposalParameters*, 2>& head, bool broadcast,
                               Tensor& ids, Tensor& scores,
                               const std::array<WorkspaceArena*, 2>& workspace,
-                              const ExecutionContext& execution, const ops::PeerEvents& events);
+                              const ExecutionContext& execution, const ops::PeerEvents& events,
+                              Tensor* peer_ids = nullptr, Tensor* peer_scores = nullptr);
 
 // One rank's scratch for dflash2_candidates_split over `columns` hidden columns of `hidden` rows.
 [[nodiscard]] std::size_t dflash2_candidates_split_workspace_bytes(const ProposalParameters& head,

@@ -629,11 +629,11 @@ auto dflash_decode_batch_body(DFlashBatchContext& state, std::int32_t batch_size
                                    sizeof(qwen3_5::DFlashDecodeIngress), cudaMemcpyHostToDevice,
                                    stream));
 
-        // Tensor-parallel width 2: the drafter runs on rank 0 alone, and rank 1 only verifies. It
-        // receives its own upload of the same ingress record, pulls rank 0's draft tokens and
-        // derives its verification inputs from them with the same Op; acceptance is rank 0's, and
-        // target_verify_accept copies its accepted counts to rank 1. Rank 1 never samples, so the
-        // record's sampling configs are never read there.
+        // Tensor-parallel width 2: rank 1 receives its own upload of the same ingress record,
+        // takes part in the split drafter (or only verifies, with the drafter on rank 0 alone), and
+        // derives its verification inputs from the round's drafts; acceptance is rank 0's, and
+        // target_verify_accept copies its accepted counts to rank 1. Rank 1 samples only the
+        // proposal, when the candidate selector is its (the record's temperature and seed).
         const TpExecution* tp      = state.execution.tp;
         const DeviceContext* rank1 = tp != nullptr ? &*tp->execution->dev[1] : nullptr;
         if (tp != nullptr) {
@@ -678,27 +678,11 @@ auto dflash_decode_batch_body(DFlashBatchContext& state, std::int32_t batch_size
 
             propose_batch_impl(state, frame, batch_size, k, envelopes);
         }
+        // Tensor-parallel width 2: the drafts reach the other rank, which derives its verification
+        // inputs from them (execution/tp2/draft_tp2.inc).
+        if (tp != nullptr) { dflash2_share_drafts_tp2(state, batch_size); }
         ops::speculative_prepare_verify_inputs(anchors, drafts, frontiers, extents, verify_ids,
                                                target_positions, stream);
-        if (tp != nullptr) {
-            // The pull is ordered after the proposal on rank 0's stream by a cross-device event,
-            // as the collectives' transfers are; nothing writes rank 0's drafts again this round.
-            const ops::PeerEvents& events = *tp->events;
-            CUDA_CHECK(cudaEventRecord(events.inputs_ready(0), stream));
-            const ScopedCurrentDevice scope(rank1->device);
-            CUDA_CHECK(cudaStreamWaitEvent(rank1->stream, events.inputs_ready(0), 0));
-            qwen3_5::DFlashDecodeState& peer = *state.peer_frame;
-            Tensor peer_drafts               = peer.draft_tokens.slice(1, 0, batch_size);
-            Tensor peer_verify_ids           = peer.verify_ids.slice(1, 0, batch_size);
-            Tensor peer_positions            = peer.verify_positions.slice(1, 0, batch_size);
-            CUDA_CHECK(cudaMemcpyAsync(peer_drafts.data, drafts.data, drafts.bytes(),
-                                       cudaMemcpyDeviceToDevice, rank1->stream));
-            ops::speculative_prepare_verify_inputs(peer.anchors.slice(0, 0, batch_size),
-                                                   peer_drafts,
-                                                   peer.execution_frontiers.slice(0, 0, batch_size),
-                                                   peer.proposal_extents.slice(0, 0, batch_size),
-                                                   peer_verify_ids, peer_positions, rank1->stream);
-        }
 
         TextContext card(state.execution.device, state.execution.parameters, state.execution.work,
                          {}, state.execution.linear_attention, state.execution.io,

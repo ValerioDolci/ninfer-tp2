@@ -32,7 +32,8 @@ void dflash2_candidates_split(const std::array<Tensor, 2>& hidden,
                               const std::array<const ProposalParameters*, 2>& head, bool broadcast,
                               Tensor& ids, Tensor& scores,
                               const std::array<WorkspaceArena*, 2>& workspace,
-                              const ExecutionContext& execution, const ops::PeerEvents& events) {
+                              const ExecutionContext& execution, const ops::PeerEvents& events,
+                              Tensor* peer_ids, Tensor* peer_scores) {
     const std::int32_t rows    = hidden[0].ne[0];
     const std::int32_t columns = hidden[0].ne[1];
     for (std::size_t r = 0; r < 2; ++r) {
@@ -80,8 +81,18 @@ void dflash2_candidates_split(const std::array<Tensor, 2>& hidden,
     }
     // The ranks' candidates occupy disjoint digits, so the summing exchange is their exact union.
     ops::allreduce_sum(packed, {roots[0].staging, roots[1].staging}, execution, events);
-    const ScopedCurrentDevice rank0(execution.dev[0]->device);
+    if ((peer_ids == nullptr) != (peer_scores == nullptr)) {
+        throw std::invalid_argument(
+            "tensor-parallel DFlash2 candidates: rank 1 needs both ids and scores");
+    }
+    const ScopedCurrentDevice restore;
+    ScopedCurrentDevice::select(execution.dev[0]->device);
     ops::topk_split_merge(packed[0], ids, scores, execution.dev[0]->stream);
+    if (peer_ids != nullptr) {
+        // Rank 1 holds the same union: its merge writes the same top sixteen.
+        ScopedCurrentDevice::select(execution.dev[1]->device);
+        ops::topk_split_merge(packed[1], *peer_ids, *peer_scores, execution.dev[1]->stream);
+    }
 }
 
 } // namespace ninfer::models::qwen3_5::execution

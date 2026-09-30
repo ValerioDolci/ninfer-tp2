@@ -853,7 +853,8 @@ struct TpTransportStatus {
     // Under MTP or DFlash2 with the optimized proposal head: "split by vocabulary" or "rank 0"
     // (NINFER_TP_DRAFT_HEAD=primary; for DFlash2 also NINFER_TP_DRAFTER=primary); empty otherwise.
     std::string proposal_head;
-    // Under DFlash2: "split (16/4 heads, MLP halves; selector on rank 0)" or "rank 0"
+    // Under DFlash2: "split (16/4 heads, MLP halves; selector on rank 1)" (on rank 0 with
+    // NINFER_TP_SELECTOR=primary, NINFER_TP_DRAFT_HEAD=primary or Vision on rank 1) or "rank 0"
     // (NINFER_TP_DRAFTER=primary); empty otherwise.
     std::string drafter;
 };

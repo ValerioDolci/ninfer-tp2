@@ -878,6 +878,7 @@ std::unique_ptr<SequencePlanImpl> build_sequence_candidate(const SequencePlannin
     auto impl                    = std::make_unique<SequencePlanImpl>();
     impl->parameters             = inputs.parameters;
     impl->vision_parameters      = inputs.vision_parameters;
+    impl->peer_parameters        = inputs.peer_parameters;
     impl->max_vision_item_tokens = inputs.max_vision_item_tokens;
     impl->capacity            = inputs.capacity;
     impl->main_page_groups    = main_page_groups;
@@ -974,6 +975,7 @@ make_sequence_planner_impl(const execution::Parameters& parameters,
     SequencePlanningInputs inputs{
         .parameters             = &parameters,
         .vision_parameters      = models::vision_rank(options) == 1 ? peer_parameters : &parameters,
+        .peer_parameters        = peer_parameters,
         .max_vision_item_tokens = options.max_vision_tokens.value_or(kMaximumMaxVisionTokens),
         .capacity               = options.max_context,
         .max_concurrency        = options.max_concurrency,

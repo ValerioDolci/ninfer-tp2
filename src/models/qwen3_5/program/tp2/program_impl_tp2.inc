@@ -119,9 +119,10 @@ void ProgramImpl::construct_tensor_parallel(const SequencePlanImpl& plan,
         }
         if (speculative_backend == SpeculativeBackend::DFlash2) {
             tp_transport_status.drafter =
-                execution::dflash2_drafter_split(*peer_parameters)
-                    ? "split (16/4 attention heads, MLP halves per rank; selector on rank 0)"
-                    : "rank 0";
+                !execution::dflash2_drafter_split(*peer_parameters) ? "rank 0"
+                : execution::dflash2_selector_rank(parameters) == 1
+                    ? "split (16/4 attention heads, MLP halves per rank; selector on rank 1)"
+                    : "split (16/4 attention heads, MLP halves per rank; selector on rank 0)";
         }
         {
             // cudaMalloc is neither stream-ordered nor capturable: rank 1's storage is allocated
