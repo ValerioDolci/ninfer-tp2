@@ -4,6 +4,7 @@
 // Our file: the upstream execution headers carry no hook.
 
 #include "models/qwen3_5/execution/tp2/attention_split.h"
+#include "models/qwen3_5/execution/tp2/draft_split.h"
 #include "models/qwen3_5/execution/tp2/ffn_split.h"
 #include "models/qwen3_5/execution/tp2/gdn_split.h"
 #include "models/qwen3_5/execution/tp2/linear_split.h"

@@ -250,6 +250,12 @@ void ProgramImpl::prepare_graphs() {
                     dflash->pending_features.slice(2, static_cast<std::int32_t>(row), 1);
                 CUDA_CHECK(cudaMemsetAsync(pending.data, 0, pending.bytes(), device.stream));
             }
+            if (peer && peer->dflash) {
+                const ScopedCurrentDevice rank1(peer->device.device);
+                const Tensor pending =
+                    peer->dflash->pending_features.slice(2, static_cast<std::int32_t>(row), 1);
+                CUDA_CHECK(cudaMemsetAsync(pending.data, 0, pending.bytes(), peer->device.stream));
+            }
         }
         set_device_i32(io.pos, checked_i32(frontier, "graph representative position"));
         set_device_i32(io.rope_pos, checked_i32(frontier, "graph representative rope position"));
@@ -536,6 +542,14 @@ void ProgramImpl::prepare_graphs() {
                                    dflash->prefill_positions.bytes(), device.stream));
         CUDA_CHECK(cudaMemsetAsync(dflash->pending_features.data, 0,
                                    dflash->pending_features.bytes(), device.stream));
+    }
+    if (peer && peer->dflash) {
+        // The split drafter's rank 1 state, as rank 0's above (its rings: state_images' mirror).
+        const ScopedCurrentDevice rank1(peer->device.device);
+        for (const Tensor* t : {&peer->dflash->prefill_features, &peer->dflash->prefill_positions,
+                                &peer->dflash->pending_features}) {
+            CUDA_CHECK(cudaMemsetAsync(t->data, 0, t->bytes(), peer->device.stream));
+        }
     }
     CUDA_CHECK(cudaMemsetAsync(token_counts.data, 0, token_counts.bytes(), device.stream));
     synchronize_devices();

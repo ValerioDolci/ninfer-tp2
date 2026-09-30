@@ -138,10 +138,14 @@ std::uint64_t row_elements(const artifact::Shape& shape) {
     return shape.size() > 1 ? weight_element_count(std::span(shape).subspan(1)) : 1;
 }
 
-// Sorts, rejects overlaps and joins adjacent ranges.
+// Sorts, rejects overlaps and joins adjacent ranges. Parameters that share a parent's rows (the
+// DFlash2 drafter's context key/value and key/value) demand the same range twice: an exact
+// duplicate is one range.
 void normalize(std::vector<SliceRange>& ranges, const std::string& id) {
-    std::sort(ranges.begin(), ranges.end(),
-              [](const SliceRange& a, const SliceRange& b) { return a.begin < b.begin; });
+    std::sort(ranges.begin(), ranges.end(), [](const SliceRange& a, const SliceRange& b) {
+        return a.begin != b.begin ? a.begin < b.begin : a.count < b.count;
+    });
+    ranges.erase(std::unique(ranges.begin(), ranges.end()), ranges.end());
     std::vector<SliceRange> out;
     for (const auto& range : ranges) {
         if (!out.empty() && out.back().begin + out.back().count > range.begin) {
@@ -226,6 +230,62 @@ bool split_proposal_rows(std::uint64_t rows, const Config& config, const LoadOpt
     return false;
 }
 
+// The DFlash2 drafter at tp 2 (NINFER_TP_DRAFTER=primary keeps it PrimaryOnly): a draft block's
+// attention heads and MLP rows split like a Text block's, with the query, key and value heads of
+// each rank in contiguous blocks; the convolution kernels, the norms and the feature projection are
+// replicated (every rank computes the same context and conv coefficients from its own copy of the
+// replicated residual); the candidate selector stays on rank 0.
+bool split_dflash2_drafter(const Config& config, const LoadOptions& options) {
+    return options.dflash2() && options.tp > 1 && !drafter_primary_requested() && config.draft &&
+           config.draft->dflash2 && config.draft->full_layer_count() == 0;
+}
+
+LogicalShard draft_block_shard(std::string_view name, std::string_view leaf,
+                               const artifact::Shape& shape, const DraftConfig& draft, int tp) {
+    if (leaf == "input_norm" || leaf == "post_attention_norm" || leaf == "attention/query_norm" ||
+        leaf == "attention/key_norm" || leaf.starts_with("attention_conv/") ||
+        leaf.starts_with("mlp_conv/")) {
+        return whole(ShardAxis::Replicated);
+    }
+    const auto& a = draft.attention;
+    if (leaf == "attention/query") {
+        return even(name, ShardAxis::Rows, leading(name, shape), a.num_attention_heads, tp);
+    }
+    if (leaf == "attention/key" || leaf == "attention/value" || leaf == "attention/context_key" ||
+        leaf == "attention/context_value") {
+        return even(name, ShardAxis::Rows, leading(name, shape), a.num_key_value_heads, tp);
+    }
+    if (leaf == "attention/output") {
+        return even(name, ShardAxis::Columns, trailing(name, shape), a.num_attention_heads, tp);
+    }
+    if (leaf == "mlp/gate" || leaf == "mlp/up") {
+        const auto rows = leading(name, shape);
+        return even(name, ShardAxis::Rows, rows, rows, tp);
+    }
+    if (leaf == "mlp/down") {
+        const auto columns = trailing(name, shape);
+        return even(name, ShardAxis::Columns, columns, columns, tp);
+    }
+    reject(name, "has no DFlash2 drafter placement for this parameter");
+}
+
+LogicalShard drafter_shard(std::string_view name, const artifact::Shape& shape,
+                           const Config& config, int tp) {
+    constexpr std::string_view layers = "dflash2/layers/";
+    if (name.starts_with(layers)) {
+        const auto slash = name.find('/', layers.size());
+        if (slash != std::string_view::npos) {
+            return draft_block_shard(name, name.substr(slash + 1), shape, *config.draft, tp);
+        }
+    }
+    if (name == "dflash2/feature_projection" || name == "dflash2/context_norm" ||
+        name == "dflash2/final_norm") {
+        return whole(ShardAxis::Replicated);
+    }
+    if (in_component(name, "dflash2/candidate_selector")) { return whole(ShardAxis::PrimaryOnly); }
+    reject(name, "has no DFlash2 drafter placement for this parameter");
+}
+
 bool split_proposal_head(const artifact::Shape& shape, const Config& config,
                          const LoadOptions& options) {
     return shape.size() == 2 && split_proposal_rows(shape.front(), config, options);
@@ -249,6 +309,9 @@ LogicalShard shard_rule(std::string_view name, const artifact::Shape& shape, con
         (name == "proposal/token_ids" && split_proposal_token_ids(shape, config, options))) {
         const auto rows = leading(name, shape);
         return even(name, ShardAxis::Rows, rows, rows, tp);
+    }
+    if (in_component(name, "dflash2") && split_dflash2_drafter(config, options)) {
+        return drafter_shard(name, shape, config, tp);
     }
     if (in_component(name, "dflash") || in_component(name, "dflash2") ||
         in_component(name, "proposal")) {

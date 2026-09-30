@@ -15,6 +15,13 @@ public:
     // Rank 0's operand then rank 1's, each resident on that rank's device.
     using RankTensors = std::array<Tensor, kTensorParallelWidth>;
 
+    // The split DFlash2 drafter (execution/tp2/draft_split.h) keeps its own target features on
+    // rank 1: every call that runs a DFlash feature tap on rank 0's residual then also feeds this
+    // sink rank 1's copy of the replicated residual, on rank 1's stream, and a prefill chunk's
+    // consumer appends rank 1's context after rank 0's. Null (the default): rank 1 captures
+    // nothing. The sink must outlive the calls it serves.
+    void set_peer_feature_sink(DFlashFeatureSink* sink) noexcept { peer_feature_sink_ = sink; }
+
     // --- tp == 2 speculative forms --------------------------------------------------------------
     // Rank 1's control tensors are its own copies of rank 0's values (the Program uploads the same
     // host ingress record to both ranks and derives the rest with the same Ops). Token ids an MTP

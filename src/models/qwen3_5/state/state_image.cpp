@@ -321,10 +321,15 @@ const CyclicKVCache* StateImageDevicePool::dflash_local() const noexcept {
 
 void StateImageDevicePool::attach_mirror(StateImageDevicePool& mirror, int device,
                                          cudaStream_t stream) {
+    // A mirror holds DFlash local state only for the split DFlash2 drafter (a rank's KV heads),
+    // and then with the origin's slots and layers.
+    const bool dflash_mismatch =
+        mirror.dflash_local_ && (!dflash_local_ ||
+                                 mirror.dflash_local_->layer_count() != dflash_local_->layer_count());
     if (&mirror == this || mirror.slot_count() != slot_count() ||
         mirror.linear_.layer_count() != linear_.layer_count() ||
         mirror.host_layout_.spec.hidden != host_layout_.spec.hidden || device < 0 ||
-        stream == nullptr) {
+        stream == nullptr || dflash_mismatch) {
         throw std::invalid_argument("StateImage mirror pool does not match the origin pool");
     }
     mirror_        = &mirror;
@@ -352,9 +357,13 @@ void StateImageDevicePool::zero_slot(std::int32_t slot, cudaStream_t stream) {
     zero_slot_local(slot, stream);
     if (mirror_ != nullptr) {
         const ScopedCurrentDevice scope(mirror_device_);
-        mirror_->linear_.zero_slot(slot, mirror_stream_);
-        const Tensor hidden = mirror_->continuation_hidden_slot(slot);
-        CUDA_CHECK(cudaMemsetAsync(hidden.data, 0, hidden.bytes(), mirror_stream_));
+        if (mirror_->dflash_local_) {
+            mirror_->zero_slot_local(slot, mirror_stream_);
+        } else {
+            mirror_->linear_.zero_slot(slot, mirror_stream_);
+            const Tensor hidden = mirror_->continuation_hidden_slot(slot);
+            CUDA_CHECK(cudaMemsetAsync(hidden.data, 0, hidden.bytes(), mirror_stream_));
+        }
     }
 }
 
@@ -399,6 +408,10 @@ void StateImageDevicePool::copy_slot(std::int32_t source, std::int32_t destinati
     if (mirror_ != nullptr) {
         const ScopedCurrentDevice scope(mirror_device_);
         mirror_->copy_slot_local(source, destination, mirror_stream_);
+        if (mirror_->dflash_local_) {
+            mirror_->dflash_local_->copy_slot_from(*mirror_->dflash_local_, source, destination,
+                                                  mirror_stream_);
+        }
     }
 }
 
@@ -409,6 +422,11 @@ void StateImageDevicePool::copy_dflash_local(std::int32_t source, std::int32_t d
     if (!dflash_local_) { throw std::logic_error("StateImage has no DFlash local component"); }
     if (source != destination) {
         dflash_local_->copy_slot_from(*dflash_local_, source, destination, stream);
+        if (mirror_ != nullptr && mirror_->dflash_local_) {
+            const ScopedCurrentDevice scope(mirror_device_);
+            mirror_->dflash_local_->copy_slot_from(*mirror_->dflash_local_, source, destination,
+                                                  mirror_stream_);
+        }
     }
 }
 

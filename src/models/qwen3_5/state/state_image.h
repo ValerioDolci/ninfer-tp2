@@ -153,8 +153,9 @@ public:
 
     // Tensor-parallel rank 1's replica of this pool. Every zero_slot/zero_all/copy_slot issued
     // here is repeated at the same slot indices on `mirror` on `stream` with `device` current, so
-    // rank 1's GDN/hidden continuation state follows rank 0's slot lifecycle. DFlash local state
-    // is rank-0-only and is not mirrored; Host transfers are rejected while a mirror is attached.
+    // rank 1's GDN/hidden continuation state follows rank 0's slot lifecycle. DFlash local state is
+    // mirrored when the mirror has it (the split DFlash2 drafter: rank 1's rings of its own KV
+    // heads) and is rank-0-only otherwise; Host transfers are rejected while a mirror is attached.
     void attach_mirror(StateImageDevicePool& mirror, int device, cudaStream_t stream);
 
     void zero_slot(std::int32_t slot, cudaStream_t stream = nullptr);

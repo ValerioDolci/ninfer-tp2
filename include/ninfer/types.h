@@ -1076,6 +1076,9 @@ struct LoadSummary {
     // vocabulary" (both ranks, the default) or "rank 0" (NINFER_TP_DRAFT_HEAD=primary, and for
     // DFlash2 NINFER_TP_DRAFTER=primary); empty otherwise.
     std::string tp_proposal_head;
+    // tp 2 DFlash2: where the drafter runs, "split (...)" (both ranks, the default) or "rank 0"
+    // (NINFER_TP_DRAFTER=primary); empty otherwise.
+    std::string tp_drafter;
     ContextCostSummary context_cost;
 };
 

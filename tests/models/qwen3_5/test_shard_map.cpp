@@ -154,6 +154,54 @@ void logical_policy_27b() {
         expect(config, "proposal/token_ids", {proposal}, ShardAxis::PrimaryOnly, {}, 0, dflash2);
         ::unsetenv("NINFER_TP_DRAFTER");
     }
+    {
+        // The DFlash2 drafter splits under DFlash2 (NINFER_TP_DRAFTER=primary keeps it on rank 0):
+        // attention by its 32/8 heads, MLP rows and down columns, conv kernels, norms and the
+        // feature projection replicated, the selector on rank 0.
+        auto drafted  = config;
+        auto& draft   = drafted.draft.emplace();
+        draft.attention         = qwen::AttentionConfig{32, 8, 128};
+        draft.intermediate_size = 17408;
+        draft.num_hidden_layers = 5;
+        draft.layer_types.assign(5, qwen::DraftAttentionKind::SlidingAttention);
+        draft.sliding_window = 2048;
+        draft.dflash2        = qwen::DFlash2Config{2, 16, 256, 16};
+        const LoadOptions dflash2{.speculative = SpeculativeBackend::DFlash2, .tp = 2};
+        const std::string d = "dflash2/layers/3/";
+        expect(drafted, d + "attention/query", {4096, h}, ShardAxis::Rows,
+               {halves(4096, 0), halves(4096, 1)}, 0, dflash2);
+        for (const auto* leaf : {"key", "value", "context_key", "context_value"}) {
+            expect(drafted, d + "attention/" + leaf, {1024, h}, ShardAxis::Rows,
+                   {halves(1024, 0), halves(1024, 1)}, 0, dflash2);
+        }
+        expect(drafted, d + "attention/output", {h, 4096}, ShardAxis::Columns,
+               {halves(4096, 0), halves(4096, 1)}, 0, dflash2);
+        for (const auto* leaf : {"mlp/gate", "mlp/up"}) {
+            expect(drafted, d + leaf, {17408, h}, ShardAxis::Rows,
+                   {halves(17408, 0), halves(17408, 1)}, 0, dflash2);
+        }
+        expect(drafted, d + "mlp/down", {h, 17408}, ShardAxis::Columns,
+               {halves(17408, 0), halves(17408, 1)}, 0, dflash2);
+        for (const auto* leaf : {"input_norm", "post_attention_norm", "attention/query_norm",
+                                 "attention/key_norm", "attention_conv/base_kernel",
+                                 "attention_conv/kernel_projection", "mlp_conv/base_kernel",
+                                 "mlp_conv/kernel_projection"}) {
+            expect(drafted, d + leaf, {h}, ShardAxis::Replicated, {}, 0, dflash2);
+        }
+        for (const auto* name :
+             {"dflash2/feature_projection", "dflash2/context_norm", "dflash2/final_norm"}) {
+            expect(drafted, name, {h}, ShardAxis::Replicated, {}, 0, dflash2);
+        }
+        expect(drafted, "dflash2/candidate_selector/successor_codebook", {vocab, 256},
+               ShardAxis::PrimaryOnly, {}, 0, dflash2);
+        // Under MTP, or with NINFER_TP_DRAFTER=primary, the drafter stays whole on rank 0.
+        expect(drafted, d + "mlp/gate", {17408, h}, ShardAxis::PrimaryOnly, {}, 0,
+               {.speculative = SpeculativeBackend::Mtp, .tp = 2});
+        ::setenv("NINFER_TP_DRAFTER", "primary", 1);
+        expect(drafted, d + "attention/query", {4096, h}, ShardAxis::PrimaryOnly, {}, 0, dflash2);
+        expect(drafted, "dflash2/feature_projection", {h}, ShardAxis::PrimaryOnly, {}, 0, dflash2);
+        ::unsetenv("NINFER_TP_DRAFTER");
+    }
     expect(config, "vision/layers/0/attention/query", {1152, 1152}, ShardAxis::SingleDevice, {}, 1,
            {.tp = 2, .vision_rank = 1});
 

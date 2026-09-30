@@ -104,6 +104,13 @@ private:
 
     // rank 1's StateImage column for set_rewrite_checkpoint_hidden_output() (MTP only).
     Tensor* peer_rewrite_checkpoint_hidden_output_ = nullptr;
+    // The split DFlash2 drafter's rank 1 feature sink (set_peer_feature_sink); null otherwise.
+    DFlashFeatureSink* peer_feature_sink_ = nullptr;
+    // Rank 1's calls on peer_feature_sink_, beside the rank 0 tap's (no-ops without a peer sink).
+    void peer_tap_begin(const Tensor& x1);
+    void peer_tap_capture_layer(int layer, const Tensor& x1);
+    void peer_tap_capture_positions(const Tensor& positions1);
+    void peer_tap_consume_prefill_chunk(std::int32_t tokens, bool rewrite_checkpoint);
 
     const TpExecution* tp_ = nullptr;
     // Each rank's share of config_ (shard_text_config), present only at tp == 2.

@@ -6,6 +6,7 @@
 #include "core/device.h"
 #include "core/tensor.h"
 #include "models/qwen3_5/execution/parameters.h"
+#include "models/qwen3_5/program/context.h"
 #include "ninfer/ops/allreduce.h"
 
 #include <array>
@@ -13,6 +14,47 @@
 #include <cstdint>
 
 namespace ninfer::models::qwen3_5::execution {
+
+// Rank 1's half of the split DFlash2 drafter (load/sharding.h): its ExecutionCore (rank 1's
+// device, Parameters with the drafter shards, workspace, round state and prefill hidden) and its
+// own drafter state (DFlash rings of its four KV heads in rank 1's StateImages, prefill and pending
+// target features captured from rank 1's copy of the replicated residual). Owned by the Program's
+// rank 1 runtime; TpExecution::dflash names it. Rank 1's DFlash2 decode frame is the round's
+// `peer_frame`.
+struct DFlashPeerDrafter {
+    ExecutionCore execution;
+    DFlashPersistentState& dflash;
+};
+
+// Whether a rank's Parameters hold the split drafter: its layers' context key blocks carry half of
+// the drafter's KV heads.
+[[nodiscard]] bool dflash2_drafter_split(const Parameters& parameters);
+
+// The split drafter's round prelude on both ranks: each rank gathers its pending target features,
+// appends its context (replicated feature projection, its own four KV heads) and runs its half of
+// the drafter layers; the attention output and MLP down projections are row-parallel, summed by
+// one allreduce_sum each, after which both ranks apply the dynamic convolution's finish to the
+// identical sum. Both ranks then rank the candidates of their proposal head blocks
+// (dflash2_candidates_split, no broadcast) and rank 0 selects the drafts into `state.frame`.
+void dflash2_draft_round_tp2(DFlashBatchContext& state, std::int32_t batch_size, std::uint32_t k,
+                             DFlashEnvelopes envelopes);
+
+// The split drafter's eager context catch-up on rank 1 (ProgramImpl::enqueue_dflash_context_append
+// does rank 0's): uploads `host_ingress` to rank 1's decode frame, gathers rank 1's pending
+// features and appends rank 1's context.
+void dflash_append_context_peer(DFlashPeerDrafter& peer, const qwen3_5::DFlashDecodeIngress& host,
+                                std::int32_t batch, std::uint32_t draft_window,
+                                ops::KVCacheAppendPrefixExecutionEnvelope envelope);
+
+// Rank 1's DFlash feature sinks of the split drafter: target verification scatters into its pending
+// features, and a prefill chunk into its prefill features, whose consumer appends rank 1's context
+// with the chunk's bindings (`host_ingress`, already filled by rank 0's consumer).
+[[nodiscard]] DFlashFeatureSink dflash_peer_batch_sink(DFlashPeerDrafter& peer,
+                                                       const Tensor& lanes,
+                                                       const Tensor& valid_columns,
+                                                       std::int32_t width, std::int32_t batch);
+[[nodiscard]] DFlashFeatureSink
+dflash_peer_prefill_sink(DFlashPeerDrafter& peer, qwen3_5::DFlashPrefillIngress* host_ingress);
 
 // Vocabulary-split DFlash2 candidate ranking. `head[r]` is rank r's row block of the optimized
 // proposal head with its block of the row -> token map (load/sharding.h: DFlash2 splits both by

@@ -165,6 +165,29 @@ std::array<WorkspaceArena*, kTensorParallelWidth> TextContext::workspaces() cons
     return {&work_, tp_->work};
 }
 
+void TextContext::peer_tap_begin(const Tensor& x1) {
+    if (peer_feature_sink_ != nullptr) { peer_feature_sink_->begin(x1); }
+}
+
+void TextContext::peer_tap_capture_layer(int layer, const Tensor& x1) {
+    if (peer_feature_sink_ == nullptr) { return; }
+    const ScopedCurrentDevice rank1(tp_->execution->dev[1]->device);
+    peer_feature_sink_->capture_layer(layer, x1, rank_stream(1));
+}
+
+void TextContext::peer_tap_capture_positions(const Tensor& positions1) {
+    if (peer_feature_sink_ == nullptr) { return; }
+    const ScopedCurrentDevice rank1(tp_->execution->dev[1]->device);
+    peer_feature_sink_->capture_positions(positions1, rank_stream(1));
+}
+
+void TextContext::peer_tap_consume_prefill_chunk(std::int32_t tokens, bool rewrite_checkpoint) {
+    if (peer_feature_sink_ == nullptr) { return; }
+    const ScopedCurrentDevice rank1(tp_->execution->dev[1]->device);
+    tp_->work->reset();
+    peer_feature_sink_->consume_prefill_chunk(tokens, rewrite_checkpoint);
+}
+
 cudaStream_t TextContext::rank_stream(int rank) const noexcept {
     return rank == 0 ? ctx_.stream : tp_->execution->dev[1]->stream;
 }
@@ -585,6 +608,7 @@ void TextContext::run_layers_tp2(RankTensors& x, Phase ph, const RankTensors& st
             }
             if constexpr (Tap::enabled) {
                 tap.capture_layer(static_cast<int>(layer), x[0], ctx_.stream);
+                peer_tap_capture_layer(static_cast<int>(layer), x[1]);
             }
         } catch (const std::exception& error) {
             throw std::runtime_error(
@@ -780,10 +804,14 @@ TextContext::prefill_impl_tp2(std::span<const int> ids, const TextPrefill* text_
         const ops::CausalAttentionExecutionEnvelope chunk_envelope{visible, visible};
         ScopedEnvelope scoped_envelope(active_causal_attention_envelope_, chunk_envelope);
 
-        if constexpr (Tap::enabled) { tap.begin(x[0]); }
+        if constexpr (Tap::enabled) {
+            tap.begin(x[0]);
+            peer_tap_begin(x[1]);
+        }
         run_layers_tp2(x, Phase::Prefill, staging, tap);
         if constexpr (requires { tap.capture_positions(positions[0], s); }) {
             tap.capture_positions(positions[0], s);
+            peer_tap_capture_positions(positions[1]);
         }
 
         // Rank 0 keeps the whole normalized chunk (prefill_hidden and the rewrite checkpoint read
@@ -946,6 +974,7 @@ TextContext::prefill_impl_tp2(std::span<const int> ids, const TextPrefill* text_
     if constexpr (requires { tap.consume_prefill_chunk(len, false); }) {
         work_.reset();
         tap.consume_prefill_chunk(len, split_rel > 0 && len == split_rel);
+        peer_tap_consume_prefill_chunk(len, split_rel > 0 && len == split_rel);
     }
 
     prefill_split_frontier_ = -1;
@@ -1054,11 +1083,16 @@ void TextContext::target_verify_batch_tp2_impl(
                            rank_stream(rank));
         });
         // A DFlash feature tap reads rank 0's residual after each layer's all-reduce, which holds
-        // the complete hidden state, and scatters it into rank 0's pending features.
-        if constexpr (Tap::enabled) { tap.begin(x[0]); }
+        // the complete hidden state, and scatters it into rank 0's pending features; the split
+        // drafter's peer sink does the same with rank 1's copy.
+        if constexpr (Tap::enabled) {
+            tap.begin(x[0]);
+            peer_tap_begin(x[1]);
+        }
         run_layers_tp2(x, Phase::Verify, staging, tap);
         if constexpr (requires { tap.capture_positions(cache_positions[0], ctx_.stream); }) {
             tap.capture_positions(cache_positions[0], ctx_.stream);
+            peer_tap_capture_positions(cache_positions[1]);
         }
 
         RankTensors flat_hidden;

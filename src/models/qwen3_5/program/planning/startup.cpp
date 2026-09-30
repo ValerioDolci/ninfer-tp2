@@ -99,6 +99,12 @@ TensorLayout add_tensor(LayoutBuilder& builder, DType dtype,
     return builder.add_tensor(dtype, shape, kArenaAlign, label);
 }
 
+// At tensor-parallel width 2 (program/tp2/startup_tp2.inc): one rank's scratch of the DFlash2
+// candidate ranking over `columns` final drafter columns, split by vocabulary or whole on rank 0;
+// whether the DFlash2 drafter is split across the ranks.
+std::size_t dflash2_candidates_workspace_tp2(const SequencePlanImpl& plan, std::int32_t columns);
+bool dflash2_drafter_split_tp2(const SequencePlanImpl& plan);
+
 // Rank `rank_index`'s persistent layout. At tp 2 the ranks differ only in the masked drafter's
 // state (its context, pending and prefill features and the DFlash local slots of each StateImage):
 // the drafter runs on rank 0 alone, so rank 1 holds none of it.
@@ -109,7 +115,10 @@ PersistentLayout persistent_layout(const SequencePlanImpl& plan, int rank_index)
     // state keeps the complete vocabulary: rank 0 gathers the complete logits and samples there.
     // Rank 1's round state has the same layout, so its logits frames are allocated but unused.
     const TextConfig rank = execution::shard_text_config(config, plan.tp);
-    const bool drafter    = plan.features.masked_draft() && rank_index == 0;
+    // The split DFlash2 drafter at tp 2 keeps its state on both ranks, each ring holding the
+    // rank's KV heads (execution/tp2/draft_split.h); otherwise the drafter is rank 0's alone.
+    const bool split_drafter = plan.tp != 1 && dflash2_drafter_split_tp2(plan);
+    const bool drafter = plan.features.masked_draft() && (rank_index == 0 || split_drafter);
 
     if (!plan.context_cache.device_state_slots) {
         throw std::logic_error("Qwen3.5 context cache options are not normalized");
@@ -166,7 +175,8 @@ PersistentLayout persistent_layout(const SequencePlanImpl& plan, int rank_index)
             state_image_spec.dflash_local = qwen3_5::DFlashLocalStateSpec{
                 .layers   = draft->local_layer_count(),
                 .capacity = draft->sliding_window.value_or(0),
-                .kv_heads = dimension(draft->attention.num_key_value_heads),
+                .kv_heads = dimension(draft->attention.num_key_value_heads) /
+                            (split_drafter ? plan.tp : 1),
                 .head_dim = dimension(draft->attention.head_dim),
             };
         }
@@ -299,10 +309,6 @@ void reserve_linear_add(WorkspaceLayoutBuilder& layout, const execution::LinearP
     reserve_scratch(layout, ops::linear_add_workspace_capacity_bytes(
                                 p.weight.qtype, p.weight.n, p.weight.k, p.policy, first, last));
 }
-
-// At tensor-parallel width 2 (program/tp2/startup_tp2.inc): one rank's scratch of the DFlash2
-// candidate ranking over `columns` final drafter columns, split by vocabulary or whole on rank 0.
-std::size_t dflash2_candidates_workspace_tp2(const SequencePlanImpl& plan, std::int32_t columns);
 
 // The drafter's transient phases (execution/draft.cpp). They run on the executing device at tp 1
 // and on rank 0 alone at tp 2, where the drafter and its proposal head are whole; both widths plan

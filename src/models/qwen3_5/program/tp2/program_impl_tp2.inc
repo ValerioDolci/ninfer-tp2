@@ -15,8 +15,9 @@
 namespace ninfer::models::qwen3_5::detail {
 
 const PersistentLayout& ProgramImpl::PeerRuntime::layout(const SequencePlanImpl& plan) {
-    if (!plan.peer_persistent || plan.peer_persistent->dflash ||
-        plan.peer_persistent->state_images.dflash_local) {
+    // Rank 1 holds drafter state only for the split DFlash2 drafter, and then all of it.
+    if (!plan.peer_persistent || plan.peer_persistent->dflash.has_value() !=
+                                     plan.peer_persistent->state_images.dflash_local.has_value()) {
         throw std::logic_error("tensor-parallel plan has no rank 1 persistent layout");
     }
     return *plan.peer_persistent;
@@ -36,6 +37,11 @@ ProgramImpl::PeerRuntime::PeerRuntime(DeviceContext& peer_device, const Sequence
     }
     io             = qwen3_5::RoundState(backing, own.round);
     prefill_hidden = own.prefill_hidden.bind(backing);
+    if (own.dflash) {
+        CyclicKVCache* local = state_images->dflash_local();
+        if (local == nullptr) { throw std::logic_error("rank 1 DFlash StateImage has no rings"); }
+        dflash.emplace(backing, *own.dflash, *local);
+    }
     if (own.score_hidden) { score_hidden = own.score_hidden->bind(backing); }
     // A scoring Program decodes nothing: its round state has no decode frame.
     if (static_cast<int>(io.ordinary.has_value()) + static_cast<int>(io.mtp_decode.has_value()) +
@@ -92,6 +98,12 @@ void ProgramImpl::construct_tensor_parallel(const SequencePlanImpl& plan,
             tp_transport_status.proposal_head =
                 peer_parameters->proposal ? "split by vocabulary" : "rank 0";
         }
+        if (speculative_backend == SpeculativeBackend::DFlash2) {
+            tp_transport_status.drafter =
+                execution::dflash2_drafter_split(*peer_parameters)
+                    ? "split (16/4 attention heads, MLP halves per rank; selector on rank 0)"
+                    : "rank 0";
+        }
         {
             // cudaMalloc is neither stream-ordered nor capturable: rank 1's storage is allocated
             // once, here, with rank 1 current.
@@ -138,11 +150,27 @@ void ProgramImpl::bind_tensor_parallel_execution() {
         throw std::logic_error("tensor-parallel rank 1 has no MTP storage");
     }
     // Rank 1 verifies DFlash2 proposals in its own copy of the decode frame and records its
-    // GDN heads for the commit fold; it holds none of the drafter's state.
+    // GDN heads for the commit fold. With the split drafter it also holds its half of the drafter
+    // and all of the drafter's state (rings of its four KV heads, prefill and pending features).
+    const bool split_drafter =
+        is_masked_draft_backend(speculative_backend) && execution::dflash2_drafter_split(*peer_parameters);
     if (is_masked_draft_backend(speculative_backend) &&
         (!peer->io.dflash_decode || !peer->replay_records ||
-         peer->state_images->dflash_local() != nullptr)) {
+         peer->dflash.has_value() != split_drafter ||
+         (peer->state_images->dflash_local() != nullptr) != split_drafter ||
+         execution::dflash2_drafter_split(parameters) != split_drafter)) {
         throw std::logic_error("tensor-parallel rank 1 has no DFlash2 verification storage");
+    }
+    if (split_drafter) {
+        if (!peer->io.dflash_prefill) {
+            throw std::logic_error("tensor-parallel rank 1 has no DFlash2 prefill controls");
+        }
+        peer->drafter.emplace(execution::DFlashPeerDrafter{
+            .execution = {peer->device, *peer_parameters, peer->work, peer->state_images->linear(),
+                          &*peer->replay_records, peer->io, peer->prefill_hidden, prefill_chunk,
+                          proposal_head},
+            .dflash    = *peer->dflash,
+        });
     }
     tp_execution.emplace(execution::TpExecution{
         .execution            = execution_context,
@@ -161,6 +189,7 @@ void ProgramImpl::bind_tensor_parallel_execution() {
         .mtp                  = mtp ? &*peer->io.mtp : nullptr,
         .prefill_hidden       = mtp ? peer->prefill_hidden : Tensor{},
     });
+    if (peer->drafter) { tp_execution->dflash = &*peer->drafter; }
     const char* draft_env = std::getenv("NINFER_TP_MAILBOX_DRAFT");
     if (mtp && peer_mailbox && draft_env != nullptr && std::string_view(draft_env) == "copies") {
         tp_execution->staged_draft_collectives = true;

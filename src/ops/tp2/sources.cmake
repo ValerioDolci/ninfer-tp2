@@ -5,6 +5,8 @@ target_sources(ninfer_ops PRIVATE
   "${CMAKE_CURRENT_LIST_DIR}/../launcher/argmax_split.cu"
   "${CMAKE_CURRENT_LIST_DIR}/../launcher/concat_rows.cu"
   "${CMAKE_CURRENT_LIST_DIR}/../launcher/topk_split.cu"
+  "${CMAKE_CURRENT_LIST_DIR}/../rmsnorm_rope/tp2/rmsnorm_rope_tp2.cu"
+  "${CMAKE_CURRENT_LIST_DIR}/../context_kv_materialize/tp2/context_kv_materialize_tp2.cpp"
 )
 
 # The two-device shards of upstream's fused projections: upstream's own sources compiled again
@@ -34,6 +36,9 @@ target_sources(ninfer_ops PRIVATE
   "${CMAKE_CURRENT_LIST_DIR}/../linear_swiglu/tp2/fp8_linear_swiglu_half_plan.cpp"
   "${CMAKE_CURRENT_LIST_DIR}/../linear_swiglu/tp2/nvfp4_linear_swiglu_half_a4.cu"
   "${CMAKE_CURRENT_LIST_DIR}/../linear_swiglu/tp2/nvfp4_linear_swiglu_half_plan.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/../context_kv_materialize/tp2/materialize_shard_h4.cu"
+  "${CMAKE_CURRENT_LIST_DIR}/../attn_input_proj/tp2/q8_dflash2_attn_input_shard_small_t.cu"
+  "${CMAKE_CURRENT_LIST_DIR}/../attn_input_proj/tp2/q8_dflash2_attn_input_shard_plan.cpp"
 )
 # Warp-specialized TMA kernels stay in the non-RDC archive, as upstream's (../CMakeLists.txt).
 target_sources(ninfer_nvfp4_non_rdc PRIVATE

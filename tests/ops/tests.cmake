@@ -31,6 +31,7 @@ set(ninfer_op_tests
   output_head_split
   proposal_head_split
   proposal_topk_split
+  dflash2_head_blocks
   attention_headlocal
   attn_input_proj_split
   gdn_projections_split

@@ -11,6 +11,7 @@
 #include "ninfer/ops/argmax.h"
 #include "ninfer/ops/dynamic_grouped_conv.h"
 #include "ninfer/ops/context_kv_materialize.h"
+#include "ninfer/ops/tp2/context_kv_materialize.h"
 #include "ninfer/ops/rmsnorm_rope.h"
 #include "ninfer/ops/rmsnorm_pack_tail.h"
 #include "ninfer/ops/linear_topk.h"
@@ -36,6 +37,7 @@
 
 #include <cstddef>
 #include <stdexcept>
+#include <optional>
 #include <utility>
 
 namespace ninfer::models::qwen3_5::execution {
@@ -171,10 +173,15 @@ void append_context_impl(Context& state, const Tensor& features, const Tensor& p
             }
             const Tensor local_positions =
                 replace_local_window ? positions.slice(0, local_offset, local_width) : positions;
-            ops::context_kv_materialize(
-                context.view({dimension(target.hidden_size), local_width, batch}), local_positions,
-                local_counts, lanes, layers, {local_envelope.min_count, local_envelope.max_count},
-                state.execution.work, state.execution.device.stream);
+            // The split drafter at tp 2 holds a rank's four KV heads (execution/tp2/draft_split.h).
+            const auto materialize =
+                layers.front().key_weight.n == dimension(config.attention.key_width())
+                    ? &ops::context_kv_materialize
+                    : &ops::context_kv_materialize_head_block;
+            materialize(context.view({dimension(target.hidden_size), local_width, batch}),
+                        local_positions, local_counts, lanes, layers,
+                        {local_envelope.min_count, local_envelope.max_count}, state.execution.work,
+                        state.execution.device.stream);
         } else {
             for (int layer = 0; layer < dimension(config.num_hidden_layers); ++layer) {
                 auto layer_scope = state.execution.work.scope();
@@ -654,17 +661,23 @@ auto dflash_decode_batch_body(DFlashBatchContext& state, std::int32_t batch_size
         Tensor verify_ids         = frame.verify_ids.slice(1, 0, batch_size);
         Tensor target_positions   = frame.verify_positions.slice(1, 0, batch_size);
 
-        state.execution.work.reset();
-        Tensor compact_features = state.execution.work.alloc(
-            DType::BF16, {dimension(state.execution.parameters.draft->feature_projection.weight.k),
-                          width, batch_size});
-        ops::prepare_ragged_prefix(dflash_state(state).pending_features, active_lanes,
-                                   context_starts, frontiers, compact_features, append_positions,
-                                   append_counts, stream);
-        append_context_impl(state, compact_features, append_positions, append_counts,
-                            state_destinations, dflash_rows, envelopes.append);
+        if (tp != nullptr && tp->dflash != nullptr) {
+            // The split drafter (tp 2): both ranks append and propose (execution/tp2/).
+            dflash2_draft_round_tp2(state, batch_size, k, envelopes);
+        } else {
+            state.execution.work.reset();
+            Tensor compact_features = state.execution.work.alloc(
+                DType::BF16,
+                {dimension(state.execution.parameters.draft->feature_projection.weight.k), width,
+                 batch_size});
+            ops::prepare_ragged_prefix(dflash_state(state).pending_features, active_lanes,
+                                       context_starts, frontiers, compact_features,
+                                       append_positions, append_counts, stream);
+            append_context_impl(state, compact_features, append_positions, append_counts,
+                                state_destinations, dflash_rows, envelopes.append);
 
-        propose_batch_impl(state, frame, batch_size, k, envelopes);
+            propose_batch_impl(state, frame, batch_size, k, envelopes);
+        }
         ops::speculative_prepare_verify_inputs(anchors, drafts, frontiers, extents, verify_ids,
                                                target_positions, stream);
         if (tp != nullptr) {
@@ -693,6 +706,17 @@ auto dflash_decode_batch_body(DFlashBatchContext& state, std::int32_t batch_size
                          &state.text_cache, nullptr, tp);
         DFlashFeatureSink sink =
             batch_feature_sink_impl(state, active_lanes, valid_columns, width, batch_size);
+        // The split drafter captures rank 1's own features from its copy of the residual.
+        const Tensor peer_lanes = tp != nullptr ? state.peer_frame->active_lanes.slice(0, 0, batch_size)
+                                                : Tensor{};
+        const Tensor peer_valid =
+            tp != nullptr ? state.peer_frame->target_valid_columns.slice(0, 0, batch_size)
+                          : Tensor{};
+        std::optional<DFlashFeatureSink> peer_sink;
+        if (tp != nullptr && tp->dflash != nullptr) {
+            peer_sink = dflash_peer_batch_sink(*tp->dflash, peer_lanes, peer_valid, width,
+                                               batch_size);
+        }
         {
             nvtx::ScopedRange target_range(nvtx::Name::DecodeDFlashTarget, nvtx::Category::DFlash,
                                            static_cast<std::uint64_t>(width) * batch_size);
@@ -702,7 +726,8 @@ auto dflash_decode_batch_body(DFlashBatchContext& state, std::int32_t batch_size
                 target_verify_accept(state.execution, state.continuation_hidden_store, card,
                                      primary,
                                      dflash_verify_view(*state.peer_frame, batch_size,
-                                                        tp->replay_records, false, nullptr),
+                                                        tp->replay_records, false,
+                                                        peer_sink ? &*peer_sink : nullptr),
                                      *state.peer_continuation_hidden_store, target_envelope);
             } else {
                 target_verify_accept(state.execution, state.continuation_hidden_store, card,
@@ -753,3 +778,5 @@ void dflash_decode_batch(DFlashBatchContext& state, std::int32_t batch_size, std
 }
 
 } // namespace ninfer::models::qwen3_5::execution
+
+#include "models/qwen3_5/execution/tp2/draft_tp2.inc"

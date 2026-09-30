@@ -352,6 +352,7 @@ ConstructedModel construct_model_on(const EngineOptions& options, DeviceContext&
     summary.tp_mailbox_fallback  = instance->program->tp_transport().fallback;
     summary.tp_mailbox_kernel    = instance->program->tp_transport().exchange_kernel;
     summary.tp_proposal_head     = instance->program->tp_transport().proposal_head;
+    summary.tp_drafter           = instance->program->tp_transport().drafter;
     return {std::move(instance), std::move(summary), std::move(context_cost.model)};
 }
 

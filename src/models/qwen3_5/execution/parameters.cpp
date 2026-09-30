@@ -294,7 +294,8 @@ public:
                     return result;
                 }));
         }
-        if (w.selector) {
+        // At tp 2 the split drafter's selector stays on rank 0 (load/sharding.h).
+        if (w.selector && resident(w.selector->hidden_projection)) {
             out.selector = SelectorParameters{linear(w.selector->hidden_projection),
                                               tensor(w.selector->predecessor_codebook),
                                               tensor(w.selector->successor_codebook)};

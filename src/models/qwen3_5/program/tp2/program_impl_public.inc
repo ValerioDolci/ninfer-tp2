@@ -33,6 +33,11 @@ public:
         Tensor score_hidden;
         // Views rank 1's ordinary decode frame; empty under a speculative backend.
         execution::OrdinaryPeerFrame ordinary;
+        // The split DFlash2 drafter (load/sharding.h): rank 1's drafter state (its DFlash rings
+        // live in state_images, mirrored with rank 0's) and its drafter operands, bound by
+        // bind_tensor_parallel_execution(); empty otherwise.
+        std::optional<DFlashPersistentState> dflash;
+        std::optional<execution::DFlashPeerDrafter> drafter;
     };
 
     ExecutionContext* execution_context          = nullptr;
