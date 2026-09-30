@@ -224,10 +224,23 @@ binary; both combine with the same arithmetic, so the choice changes timings onl
 log names it (`captured all-reduces: mailbox | exchange kernel pipelined`).
 
 The `ProgramImpl` constructor ([`program_impl.cpp`](../../src/models/qwen3_5/program/program_impl.cpp))
-sizes one slot for the widest single-request exchange, `hidden × (K+1)` BF16: 10 KiB for ordinary
-decode, 40 KiB for MTP3 at hidden 5120. Every all-reduce of a single-request captured round fits;
-batched rounds whose payload exceeds the slot keep the staged path inside the same graph, and eager
-calls (every prefill and warmup) always do.
+(`construct_tensor_parallel`, `program/tp2/program_impl_tp2.inc`) sizes the ordinary slot for
+the widest single-request exchange, `hidden × (K+1)` BF16 (10 KiB for ordinary decode, 40 KiB for
+MTP3, 80 KiB for DFlash2 K=7 at hidden 5120), and adds **wide slots** for a full batch,
+`hidden × (K+1) × C` (C = `--max-concurrency`; 160 KiB for MTP3 and 320 KiB for DFlash2 K=7 at
+C=4), in a pinned slab of their own: an exchange takes an ordinary slot when it fits and a wide one
+otherwise, each set with its own round robin, flags and epochs. Every all-reduce of every captured
+round then fits; eager calls (every prefill and warmup) keep the staged path. The wide slots live
+apart because one-request exchanges run slower from a large slab: 80 KiB exchanges in 320 KiB slots
+cost ~2 µs more each in the engine (+1.7 % per DFlash2 K=7 round at one request, measured on
+two RTX 5070 Ti; the standalone probe does not show it), and with a slab of their own they run as
+before. The pinned memory is 4 × each slot per set plus one 64-byte flag line per KiB of slot
+(1.25 MiB of wide slots for DFlash2 K=7 at C=4, 640 KiB for MTP3). With the original kernel
+(`NINFER_TP_MAILBOX_LEGACY=1`), which is slower than the copies at those widths (§4.7), or with
+`NINFER_TP_MAILBOX_SLOT=request` (the A/B switch), there are no wide slots and the batched rounds'
+wider payloads take the staged path inside the same graph, as all batched rounds did up to
+v0.4.0. The startup log names the widest slot (`captured all-reduces: mailbox | exchange kernel
+pipelined | slot 320 KiB`).
 
 A poller gives up after `kPeerSpinLimit` probes, about 0.8 s (the header records 4M probes measured
 at 3.25 s on two RTX 5070 Ti; `run_mailbox_hang_case` in
@@ -308,6 +321,7 @@ Only figures already recorded, with their scope:
 | original kernel at 40 KiB, one thread's phases: 1.6 µs publish (four dependent load/store pairs), 7.0-7.4 µs `__threadfence_system` draining 16-byte stores at a 64-byte stride, 5.4-5.5 µs reading (four dependent PCIe round trips); pipelined kernel: 0.5 µs publish, 2.3 µs release fence, 1.1 µs read | same, `mailbox_probe --timed --payload 40960` (pipelined at 256 threads per block) | development measurements |
 | MTP3 decode, pipelined vs original kernel on one binary (`NINFER_TP_MAILBOX_LEGACY=1`): 19.96 vs 21.71 ms/round at 0k (−8.1 %), 20.66 vs 22.46 at 16k (−8.0 %), 22.36 vs 24.07 at 64k (−7.1 %), 108.3 vs 99.6 tok/s at 0k; with `--lm-head-draft` −8.8 / −8.7 / −7.6 %; `--no-tp-mailbox` 23.00 / 23.77 / 25.39 ms/round; identical output text on all three | same pair, QUASAR-QAT artifact, production flags at C=1, 400-token greedy generations, two ABBA rounds, 2026-09-27 | development measurements, not otherwise published |
 | MTP3 decode with `--lm-head-draft`, proposal head split vs whole on rank 0 on one binary (`NINFER_TP_DRAFT_HEAD=primary`): 17.93 vs 18.68 ms/round at 0k (−4.0 %), 18.61 vs 19.35 at 16k (−3.8 %), 20.32 vs 21.06 at 64k (−3.5 %), 123.2 vs 118.3 tok/s at 0k; identical output text and acceptance, also against main; weights on rank 0 −170 MiB, on rank 1 +170 MiB; DFlash2 K=4 unchanged | same pair, QUASAR-QAT artifact (DFlash2: `_df2`), production flags at C=1, 400-token greedy generations, two ABBA rounds, 2026-09-28 | development measurements, not otherwise published |
+| per exchange in a graph of 128, pipelined vs original kernel vs copies: 9.5 / 40.9 / 24.6 µs at 80 KiB (DFlash2 K=7, one request), 17.2 / 84.4 / 31.4 µs at 160 KiB, 23.7 / 130.5 / 40.2 µs at 240 KiB, 31.5 / 196.1 / 45.4 µs at 320 KiB (DFlash2 K=7 at C=4), 63.2 / 373.7 / 71.6 µs at 640 KiB | same pair, driver 595.91, CUDA 13.2, standalone probe (`--payload`), 2026-10-01 | development measurements |
 | mailbox ~41 µs vs staged ~277 µs per 10 KiB reduction, graph replay | 2× RTX 5060 Ti, Windows 11 WDDM, no P2P | `peer_mailbox.h` header |
 | copies cost ~220 µs per hop instead of ~17; decode without `--spec` 60 tok/s on the mailbox vs 22.5 on copies; MTP3 49 tok/s on copies everywhere | WSL2, 2× RTX 5070 Ti, reported in issue #1 | [README](../../README.md) |
 | MTP3 decode 102.3 tok/s at step 1, 101.1 at step 2, 97.1 with `--no-tp-mailbox`; plain decode 69.1 vs 59.8 on copies; identical output text on every transport | 2× RTX 5070 Ti, native Linux, QUASAR-QAT artifact, 400-token greedy generation, 3 runs, 2026-09-26 | development measurements, not otherwise published |

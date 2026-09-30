@@ -1072,6 +1072,10 @@ struct LoadSummary {
     // or "legacy" (NINFER_TP_MAILBOX_LEGACY=1, the original kernel, bit-identical results);
     // empty otherwise.
     std::string tp_mailbox_kernel;
+    // The mailbox's slot bytes while tp_transport names the mailbox: the widest captured all-reduce
+    // it carries (hidden x (K+1) x max_concurrency BF16 with the pipelined kernel; one request's
+    // width with the original kernel or NINFER_TP_MAILBOX_SLOT=request); 0 otherwise.
+    std::size_t tp_mailbox_slot_bytes = 0;
     // tp 2 MTP or DFlash2 with the optimized proposal head: where it proposes, "split by
     // vocabulary" (both ranks, the default) or "rank 0" (NINFER_TP_DRAFT_HEAD=primary, and for
     // DFlash2 NINFER_TP_DRAFTER=primary); empty otherwise.

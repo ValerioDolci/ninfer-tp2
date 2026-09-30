@@ -30,6 +30,7 @@
 #include <cstdint>
 #include <functional>
 #include <iostream>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -619,6 +620,85 @@ int run_transport_identity_case(const char* label, std::int32_t ne0, std::int32_
     return failures;
 }
 
+// One request's and a full batch's exchanges interleaved in one graph through a mailbox with
+// wide slots ([5120, 8] ordinary, [5120, 32] wide, three of each): every exchange must take the
+// mailbox (two kernel nodes each), each set alternating its own slots, and both buffers' bits must
+// equal the staged path's on the same operands.
+std::array<std::vector<std::uint16_t>, 2> mixed_width_bits(const ExecutionContext& ec,
+                                                           const ops::PeerEvents& events,
+                                                           std::size_t& nodes, int& failures) {
+    constexpr int kSites                    = 3;
+    constexpr std::array<std::int32_t, 2> kColumns{8, 32};
+    std::array<std::vector<std::uint16_t>, 2> out;
+    std::array<std::array<GuardedDeviceBuffer*, 2>, 2> buffers{};
+    std::vector<std::unique_ptr<GuardedDeviceBuffer>> owned;
+    std::array<std::array<Tensor, 2>, 2> buffer{};
+    std::array<std::array<Tensor, 2>, 2> staging{};
+    for (int w = 0; w < 2; ++w) {
+        const std::size_t bytes = std::size_t{5120} * kColumns[w] * sizeof(std::uint16_t);
+        for (int rank = 0; rank < 2; ++rank) {
+            set_device(ec, rank);
+            owned.push_back(std::make_unique<GuardedDeviceBuffer>(bytes));
+            buffers[w][rank] = owned.back().get();
+            owned.push_back(std::make_unique<GuardedDeviceBuffer>(bytes));
+            owned.back()->fill(0);
+            buffer[w][rank]  = Tensor(buffers[w][rank]->data(), DType::BF16, {5120, kColumns[w]});
+            staging[w][rank] = Tensor(owned.back()->data(), DType::BF16, {5120, kColumns[w]});
+            std::vector<float> values(std::size_t{5120} * kColumns[w]);
+            fill_uniform(values, 501u + 2u * static_cast<std::uint32_t>(w) + rank, -8.0f, 8.0f);
+            const auto bits = encode_bf16(values);
+            buffers[w][rank]->copy_from_host(bits.data(), bytes);
+        }
+    }
+    retire_staging(ec);
+    const DecodeGraphPeerBridge bridge(ec.dev[0]->device, ec.dev[1]->device);
+    DecodeGraphDefinition definition;
+    capture_two_devices(ec, bridge, definition, [&] {
+        for (int site = 0; site < kSites; ++site) {
+            ops::allreduce_sum(buffer[0], staging[0], ec, events);
+            ops::allreduce_sum(buffer[1], staging[1], ec, events);
+        }
+    });
+    nodes = definition.node_count();
+    DecodeGraphExecutable executable;
+    executable.instantiate(definition);
+    launch_two_devices(ec, executable);
+    for (int w = 0; w < 2; ++w) {
+        const std::size_t count = std::size_t{5120} * kColumns[w];
+        set_device(ec, 0);
+        out[w] = from_device<std::uint16_t>(buffers[w][0]->data(), count);
+        set_device(ec, 1);
+        failures += verify_exact("mixed widths device 1 equals device 0",
+                                 from_device<std::uint16_t>(buffers[w][1]->data(), count), out[w]);
+    }
+    return out;
+}
+
+int run_mixed_width_case(const ExecutionContext& ec, const ops::PeerEvents& staged) {
+    int failures = 0;
+    ops::PeerMailbox mailbox(ec, 5120 * 8 * sizeof(std::uint16_t), 2,
+                             ops::PeerExchangeKernel::Pipelined, 5120 * 32 * sizeof(std::uint16_t));
+    ops::PeerEvents events(ec);
+    events.attach_mailbox(&mailbox);
+    std::size_t mailbox_nodes = 0;
+    std::size_t staged_nodes  = 0;
+    const auto mailbox_bits   = mixed_width_bits(ec, events, mailbox_nodes, failures);
+    const auto staged_bits    = mixed_width_bits(ec, staged, staged_nodes, failures);
+    if (mailbox_nodes != 12 || staged_nodes <= 12) {
+        std::cerr << "mixed widths: " << mailbox_nodes << " / " << staged_nodes
+                  << " graph nodes do not match the mailbox / staged transports\n";
+        ++failures;
+    }
+    failures += verify_exact("mixed widths ordinary slots equal staged", mailbox_bits[0],
+                             staged_bits[0]);
+    failures += verify_exact("mixed widths wide slots equal staged", mailbox_bits[1], staged_bits[1]);
+    if (mailbox.hang_reported()) {
+        std::cerr << "mixed widths: a mailbox exchange reported a hang\n";
+        ++failures;
+    }
+    return failures;
+}
+
 // A peer that never arrives: only rank 0 enqueues its half. The poller must give up, report the
 // hang and return before a display watchdog (about 2 s on Windows WDDM) would reset the device.
 int run_mailbox_hang_case(const ExecutionContext& ec, ops::PeerExchangeKernel kernel) {
@@ -735,6 +815,31 @@ int main() {
                                             legacy_events, mailbox_events);
     failures += run_transport_identity_case("identity [8,1]", 8, 1, 407u, ec, events,
                                             legacy_events, mailbox_events);
+
+    // A slot of a full batch's width: DFlash2 K=7 at four requests, [5120, 8 x 4] = 320 KiB (160
+    // blocks of the pipelined kernel), carrying every narrower exchange too; one column more stays
+    // staged. The original kernel on a slot of the same width, for the identity check. Then the
+    // Program's layout: one request's slots plus wide slots, both widths in one graph.
+    ops::PeerMailbox batch_mailbox(ec, 5120 * 32 * sizeof(std::uint16_t));
+    ops::PeerEvents batch_events(ec);
+    batch_events.attach_mailbox(&batch_mailbox);
+    ops::PeerMailbox legacy_batch_mailbox(ec, 5120 * 32 * sizeof(std::uint16_t), 2,
+                                          ops::PeerExchangeKernel::Legacy);
+    ops::PeerEvents legacy_batch_events(ec);
+    legacy_batch_events.attach_mailbox(&legacy_batch_mailbox);
+    failures += run_captured_case("captured batch mailbox [5120,32]", 5120, 32, 5, true, ec,
+                                  batch_events, &batch_mailbox);
+    failures += run_captured_case("captured batch mailbox [5120,16]", 5120, 16, 3, true, ec,
+                                  batch_events, &batch_mailbox);
+    failures += run_captured_case("captured batch mailbox [5120,1]", 5120, 1, 3, true, ec,
+                                  batch_events, &batch_mailbox);
+    failures += run_captured_case("captured oversized [5120,33] stays staged", 5120, 33, 3, false,
+                                  ec, batch_events, &batch_mailbox);
+    failures += run_transport_identity_case("identity [5120,32]", 5120, 32, 409u, ec, events,
+                                            legacy_batch_events, batch_events);
+    failures += run_transport_identity_case("identity [5120,24]", 5120, 24, 411u, ec, events,
+                                            legacy_batch_events, batch_events);
+    failures += run_mixed_width_case(ec, events);
 
     failures += run_mailbox_hang_case(ec, ops::PeerExchangeKernel::Pipelined);
     failures += run_mailbox_hang_case(ec, ops::PeerExchangeKernel::Legacy);

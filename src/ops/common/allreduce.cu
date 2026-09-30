@@ -94,8 +94,8 @@ private:
 // CAPTURED MAILBOX SELECTION. Returns the mailbox attached to `events` when every predicate holds:
 //
 //   * the mailbox serves this ExecutionContext's device pair;
-//   * the payload is whole 16-byte vectors within one slot, at 16-byte aligned addresses (the
-//     exchange kernel's vector contract);
+//   * the payload is whole 16-byte vectors within one slot (ordinary or wide), at 16-byte aligned
+//     addresses (the exchange kernel's vector contract);
 //   * BOTH ranks' streams are capturing, into the SAME capture. The exchange has no host reset
 //     point and no event ordering: its two kernels must be nodes of one graph that every launch
 //     runs on both devices. A rank whose stream is not in that capture would run its half
@@ -107,7 +107,7 @@ PeerMailbox* captured_mailbox(const std::array<Tensor, 2>& buffer, std::size_t b
                               const ExecutionContext& ec, const PeerEvents& events) {
     PeerMailbox* mailbox = events.mailbox();
     if (mailbox == nullptr || events.staged_only() || !mailbox->serves(ec)) { return nullptr; }
-    if ((bytes % 16) != 0 || bytes > mailbox->slot_bytes()) { return nullptr; }
+    if ((bytes % 16) != 0 || bytes > mailbox->max_bytes()) { return nullptr; }
     unsigned long long capture[2] = {0, 0};
     for (int rank = 0; rank < 2; ++rank) {
         if ((reinterpret_cast<std::uintptr_t>(buffer[rank].data) % 16) != 0) { return nullptr; }
@@ -269,7 +269,7 @@ void allreduce_sum(const std::array<Tensor, 2>& buffer, const std::array<Tensor,
     // publish their partial into their own pinned host slot, release an epoch flag, wait for the
     // peer's, and combine locally with the same arithmetic as residual_add_launch below.
     if (PeerMailbox* mailbox = captured_mailbox(buffer, bytes, ec, events)) {
-        const int slot = mailbox->take_capture_slot();
+        const int slot = mailbox->take_capture_slot(bytes);
         for (int rank = 0; rank < 2; ++rank) {
             const DeviceContext& local = *ec.dev[rank];
             CurrentDeviceGuard::set(local.device);

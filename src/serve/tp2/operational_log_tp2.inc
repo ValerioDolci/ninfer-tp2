@@ -22,9 +22,12 @@ void log_tensor_parallel(spdlog::logger& logger, const GenerationService& servic
         const LoadSummary& load = service.load_summary();
         if (!load.tp_transport.empty()) {
             const std::string kernel =
-                load.tp_mailbox_kernel.empty()
-                    ? std::string()
-                    : " | exchange kernel " + load.tp_mailbox_kernel;
+                (load.tp_mailbox_kernel.empty()
+                     ? std::string()
+                     : " | exchange kernel " + load.tp_mailbox_kernel) +
+                (load.tp_mailbox_slot_bytes == 0
+                     ? std::string()
+                     : " | slot " + std::to_string(load.tp_mailbox_slot_bytes / 1024U) + " KiB");
             if (load.tp_mailbox_probe_ms > 0.0) {
                 logger.info(
                     "tensor parallel | captured all-reduces: {}{} | mailbox probe {:.2f} ms",

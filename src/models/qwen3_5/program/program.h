@@ -847,6 +847,9 @@ struct TpTransportStatus {
     // The mailbox's exchange kernel, "pipelined" or "legacy" (NINFER_TP_MAILBOX_LEGACY=1); empty
     // when the captured all-reduces run on the copies.
     std::string exchange_kernel;
+    // The mailbox's slot, the widest captured all-reduce it carries (hidden x (K+1) x C BF16 with
+    // the pipelined kernel); 0 when the captured all-reduces run on the copies.
+    std::size_t slot_bytes = 0;
     // Under MTP or DFlash2 with the optimized proposal head: "split by vocabulary" or "rank 0"
     // (NINFER_TP_DRAFT_HEAD=primary; for DFlash2 also NINFER_TP_DRAFTER=primary); empty otherwise.
     std::string proposal_head;

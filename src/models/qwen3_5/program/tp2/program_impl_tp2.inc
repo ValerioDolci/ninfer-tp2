@@ -14,6 +14,25 @@
 
 namespace ninfer::models::qwen3_5::detail {
 
+namespace {
+
+// The mailbox slots. Every captured exchange of a round is a [hidden, columns] BF16 activation
+// whose columns are at most (K+1) per request: the verification forward's 128, and the split
+// DFlash2 drafter's layer sums over its K+1 block columns. The ordinary slot carries one request's
+// exchange, hidden x (K+1); with `batch` the wide slots (PeerMailbox, WIDE SLOTS) carry a full
+// batch of `max_concurrency` requests, so the batched rounds stay on the mailbox instead of the
+// staged copies inside the same graph. Measured on two RTX 5070 Ti without P2P
+// (tools/tp2/mailbox_probe.cu, graph chain of 128): pipelined kernel 17.2 / 23.7 / 31.5 us against
+// copies 31.4 / 40.2 / 45.4 us per exchange at 160 / 240 / 320 KiB. The original kernel is slower
+// than the copies at those widths (84 / 131 / 196 us), so it gets no wide slots. Returns the wide
+// slot's bytes, 0 for none.
+std::size_t tp2_mailbox_wide_slot_bytes(std::size_t request_bytes, std::uint32_t max_concurrency,
+                                        bool batch) {
+    return batch && max_concurrency > 1 ? request_bytes * max_concurrency : 0;
+}
+
+} // namespace
+
 const PersistentLayout& ProgramImpl::PeerRuntime::layout(const SequencePlanImpl& plan) {
     // Rank 1 holds drafter state only for the split DFlash2 drafter, and then all of it.
     if (!plan.peer_persistent || plan.peer_persistent->dflash.has_value() !=
@@ -114,11 +133,6 @@ void ProgramImpl::construct_tensor_parallel(const SequencePlanImpl& plan,
                 graph_bridge.emplace(execution_context->dev[0]->device,
                                      execution_context->dev[1]->device);
                 if (plan.tp_mailbox) {
-                    // One slot carries the widest single-request exchange, the [hidden, K+1]
-                    // verification activation; wider (multi-request) payloads stay staged.
-                    const std::size_t slot_bytes =
-                        static_cast<std::size_t>(parameters.model.config().text.hidden_size) *
-                        (static_cast<std::size_t>(draft_window) + 1U) * sizeof(std::uint16_t);
                     // NINFER_TP_MAILBOX_LEGACY=1 keeps the original exchange kernel, for A/B
                     // runs on one binary; both kernels produce the same bits.
                     const char* legacy_env = std::getenv("NINFER_TP_MAILBOX_LEGACY");
@@ -126,9 +140,23 @@ void ProgramImpl::construct_tensor_parallel(const SequencePlanImpl& plan,
                         legacy_env != nullptr && std::string_view(legacy_env) == "1"
                             ? ops::PeerExchangeKernel::Legacy
                             : ops::PeerExchangeKernel::Pipelined;
-                    peer_mailbox.emplace(*execution_context, slot_bytes, 2, kernel);
+                    // One slot carries one request's widest exchange, the [hidden, K+1]
+                    // verification activation; the wide slots a full batch's.
+                    // NINFER_TP_MAILBOX_SLOT=request leaves the wide slots out (the batched
+                    // exchanges then take the staged copies), for A/B runs on one binary.
+                    const std::size_t slot_bytes =
+                        static_cast<std::size_t>(parameters.model.config().text.hidden_size) *
+                        (static_cast<std::size_t>(draft_window) + 1U) * sizeof(std::uint16_t);
+                    const char* slot_env = std::getenv("NINFER_TP_MAILBOX_SLOT");
+                    const std::size_t wide_slot_bytes = tp2_mailbox_wide_slot_bytes(
+                        slot_bytes, max_concurrency,
+                        kernel == ops::PeerExchangeKernel::Pipelined &&
+                            (slot_env == nullptr || std::string_view(slot_env) != "request"));
+                    peer_mailbox.emplace(*execution_context, slot_bytes, 2, kernel,
+                                         wide_slot_bytes);
                     peer_events->attach_mailbox(&*peer_mailbox);
                     tp_transport_status.exchange_kernel = ops::peer_exchange_kernel_name(kernel);
+                    tp_transport_status.slot_bytes      = peer_mailbox->max_bytes();
                     probe_peer_mailbox();
                 } else {
                     tp_transport_status.transport = "copies";
@@ -333,6 +361,7 @@ void ProgramImpl::probe_peer_mailbox() {
     }
     tp_transport_status.transport       = "copies";
     tp_transport_status.exchange_kernel = {};
+    tp_transport_status.slot_bytes      = 0;
     peer_events->attach_mailbox(nullptr);
     peer_mailbox.reset();
 }
@@ -360,6 +389,7 @@ bool ProgramImpl::degrade_peer_mailbox() {
     mtp_graphs      = {};
     dflash_graphs   = {};
     const std::size_t slot_bytes          = peer_mailbox->slot_bytes();
+    const std::size_t wide_slot_bytes     = peer_mailbox->wide_slot_bytes();
     const ops::PeerExchangeKernel kernel = peer_mailbox->kernel();
     peer_events->attach_mailbox(nullptr);
     peer_mailbox.reset();
@@ -371,7 +401,7 @@ bool ProgramImpl::degrade_peer_mailbox() {
     if (speculative_backend == SpeculativeBackend::Mtp &&
         !tp_execution->staged_draft_collectives) {
         tp_execution->staged_draft_collectives = true;
-        peer_mailbox.emplace(*execution_context, slot_bytes, 2, kernel);
+        peer_mailbox.emplace(*execution_context, slot_bytes, 2, kernel, wide_slot_bytes);
         peer_events->attach_mailbox(&*peer_mailbox);
         tp_transport_status.transport = "mailbox, MTP draft on copies";
         return true;
@@ -379,6 +409,7 @@ bool ProgramImpl::degrade_peer_mailbox() {
     tp_execution->staged_draft_collectives = false;
     tp_transport_status.transport          = "copies";
     tp_transport_status.exchange_kernel    = {};
+    tp_transport_status.slot_bytes         = 0;
     return true;
 }
 

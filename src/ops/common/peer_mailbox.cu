@@ -1,6 +1,7 @@
 // Implements: include/ninfer/ops/peer_mailbox.h
 //
-// The pinned host slab layout, in one allocation:
+// The pinned host slab layout of each slot set, in one allocation per set (the wide set has no
+// hang word):
 //
 //   [ payload rank0 slot0 .. slotN-1 ][ payload rank1 slot0 .. slotN-1 ]
 //   [ flags rank0 slot0 lane0..L-1 .. slotN-1 ][ flags rank1 ... ][ hang word ]
@@ -75,8 +76,8 @@ const char* peer_exchange_kernel_name(PeerExchangeKernel kernel) noexcept {
 }
 
 PeerMailbox::PeerMailbox(const ExecutionContext& ec, std::size_t slot_bytes, int slots,
-                         PeerExchangeKernel kernel)
-    : slot_bytes_(aligned(slot_bytes)), slots_(slots), kernel_(kernel) {
+                         PeerExchangeKernel kernel, std::size_t wide_slot_bytes)
+    : slots_(slots), kernel_(kernel) {
     require_two_devices(ec, "PeerMailbox: requires an ExecutionContext with two distinct devices");
     if (slots < 2) { throw std::invalid_argument("PeerMailbox: requires at least two slots"); }
     if (slot_bytes == 0) { throw std::invalid_argument("PeerMailbox: slot bytes must be nonzero"); }
@@ -85,39 +86,59 @@ PeerMailbox::PeerMailbox(const ExecutionContext& ec, std::size_t slot_bytes, int
     devices_[0]       = pair[0];
     devices_[1]       = pair[1];
 
-    lanes_ = detail::peer_pipelined_warps(slot_bytes_ / sizeof(detail::PeerVec),
-                                          detail::kPeerPipelinedVecsPerLane);
-    const std::size_t payload_bytes = static_cast<std::size_t>(slots_) * slot_bytes_ * 2;
-    const std::size_t flag_words =
-        static_cast<std::size_t>(slots_) * static_cast<std::size_t>(lanes_) *
-        detail::kPeerFlagStride;
-    // Both ranks' flag lines, then the hang word's line.
-    const std::size_t words_bytes =
-        (2 * flag_words + detail::kPeerFlagStride) * sizeof(std::uint32_t);
-    const std::size_t legacy_words    = static_cast<std::size_t>(slots_) * 2;
-    const std::size_t pipelined_words = static_cast<std::size_t>(slots_) * lanes_;
-    const std::size_t device_words_bytes =
-        (legacy_words > pipelined_words ? legacy_words : pipelined_words) * sizeof(std::uint32_t);
-
-    // Everything allocates into locals first and commits to members only when the whole set
-    // succeeded: a throwing constructor does not run the destructor, so a half-built object
-    // must leave nothing behind that needs it.
-    void* slab                 = nullptr;
-    std::uint32_t* words[2]    = {nullptr, nullptr};
+    const std::size_t set_bytes[2] = {aligned(slot_bytes),
+                                      aligned(wide_slot_bytes) > aligned(slot_bytes)
+                                          ? aligned(wide_slot_bytes)
+                                          : 0};
+    // Everything allocates into the sets first and the destructor's release() frees whatever was
+    // allocated: a throwing constructor does not run the destructor, so it releases itself.
     const ScopedDevice scope;
     try {
-        throw_on_error(cudaHostAlloc(&slab, payload_bytes + words_bytes,
-                                     cudaHostAllocMapped | cudaHostAllocPortable),
-                       "cudaHostAlloc");
-        std::memset(slab, 0, payload_bytes + words_bytes);
+        for (int index = 0; index < 2; ++index) {
+            if (set_bytes[index] == 0) { continue; }
+            SlotSet& set   = sets_[index];
+            set.slot_bytes = set_bytes[index];
+            set.lanes      = detail::peer_pipelined_warps(set.slot_bytes / sizeof(detail::PeerVec),
+                                                          detail::kPeerPipelinedVecsPerLane);
+            const std::size_t payload_bytes = static_cast<std::size_t>(slots_) * set.slot_bytes * 2;
+            const std::size_t flag_words    = static_cast<std::size_t>(slots_) *
+                                           static_cast<std::size_t>(set.lanes) *
+                                           detail::kPeerFlagStride;
+            // Both ranks' flag lines, then (ordinary set) the hang word's line.
+            const std::size_t words_bytes =
+                (2 * flag_words + (index == 0 ? detail::kPeerFlagStride : 0)) *
+                sizeof(std::uint32_t);
+            const std::size_t legacy_words    = static_cast<std::size_t>(slots_) * 2;
+            const std::size_t pipelined_words = static_cast<std::size_t>(slots_) * set.lanes;
+            const std::size_t device_words_bytes =
+                (legacy_words > pipelined_words ? legacy_words : pipelined_words) *
+                sizeof(std::uint32_t);
+            throw_on_error(cudaHostAlloc(&set.slab, payload_bytes + words_bytes,
+                                         cudaHostAllocMapped | cudaHostAllocPortable),
+                           "cudaHostAlloc");
+            std::memset(set.slab, 0, payload_bytes + words_bytes);
+            auto* base     = static_cast<std::uint8_t*>(set.slab);
+            set.payload[0] = base;
+            set.payload[1] = base + static_cast<std::size_t>(slots_) * set.slot_bytes;
+            auto* flags    = reinterpret_cast<std::uint32_t*>(base + payload_bytes);
+            set.flags[0]   = flags;
+            set.flags[1]   = flags + flag_words;
+            if (index == 0) { hang_ = flags + 2 * flag_words; }
+            for (int rank = 0; rank < 2; ++rank) {
+                ScopedDevice::set(pair[rank]);
+                void* words = nullptr;
+                throw_on_error(cudaMalloc(&words, device_words_bytes), "cudaMalloc");
+                set.device_words[rank] = static_cast<std::uint32_t*>(words);
+                // The legacy default stream does not order the Program's non-blocking streams, so
+                // the zeroing is retired here rather than left for the first captured exchange to
+                // race.
+                throw_on_error(cudaMemsetAsync(words, 0, device_words_bytes, nullptr),
+                               "cudaMemsetAsync");
+                throw_on_error(cudaStreamSynchronize(nullptr), "cudaStreamSynchronize");
+            }
+        }
         for (int rank = 0; rank < 2; ++rank) {
             ScopedDevice::set(pair[rank]);
-            throw_on_error(cudaMalloc(&words[rank], device_words_bytes), "cudaMalloc");
-            // The legacy default stream does not order the Program's non-blocking streams, so the
-            // zeroing is retired here rather than left for the first captured exchange to race.
-            throw_on_error(cudaMemsetAsync(words[rank], 0, device_words_bytes, nullptr),
-                           "cudaMemsetAsync");
-            throw_on_error(cudaStreamSynchronize(nullptr), "cudaStreamSynchronize");
             // Loads the exchange kernel on this device now: a module cannot be loaded inside the
             // capture that first launches it.
             cudaFuncAttributes attributes{};
@@ -130,32 +151,28 @@ PeerMailbox::PeerMailbox(const ExecutionContext& ec, std::size_t slot_bytes, int
                 "cudaFuncGetAttributes");
         }
     } catch (...) {
-        if (slab != nullptr) { (void)cudaFreeHost(slab); }
-        for (int rank = 0; rank < 2; ++rank) {
-            if (words[rank] != nullptr) {
-                (void)cudaSetDevice(pair[rank]);
-                (void)cudaFree(words[rank]);
-            }
-        }
+        release();
         throw;
     }
+}
 
-    slab_            = slab;
-    auto* base       = static_cast<std::uint8_t*>(slab_);
-    payload_[0]      = base;
-    payload_[1]      = base + static_cast<std::size_t>(slots_) * slot_bytes_;
-    auto* flags      = reinterpret_cast<std::uint32_t*>(base + payload_bytes);
-    flags_[0]        = flags;
-    flags_[1]        = flags + flag_words;
-    hang_            = flags + 2 * flag_words;
-    device_words_[0] = words[0];
-    device_words_[1] = words[1];
+void PeerMailbox::release() noexcept {
+    for (SlotSet& set : sets_) {
+        for (int rank = 0; rank < 2; ++rank) {
+            if (set.device_words[rank] == nullptr) { continue; }
+            (void)cudaSetDevice(devices_[rank]);
+            (void)cudaFree(set.device_words[rank]);
+            set.device_words[rank] = nullptr;
+        }
+        if (set.slab != nullptr) { (void)cudaFreeHost(set.slab); }
+        set.slab = nullptr;
+    }
 }
 
 PeerMailbox::~PeerMailbox() {
     const ScopedDevice scope;
     // The owner destroys every graph executable first, but a launch may still be in flight: the
-    // pinned slab and the counters are released only once both devices retired it.
+    // pinned slabs and the counters are released only once both devices retired it.
     for (int rank = 0; rank < 2; ++rank) {
         if (cudaSetDevice(devices_[rank]) != cudaSuccess) { continue; }
         const cudaError_t status = cudaDeviceSynchronize();
@@ -163,9 +180,8 @@ PeerMailbox::~PeerMailbox() {
             std::fprintf(stderr, "CUDA cleanup failed during cudaDeviceSynchronize: %s: %s\n",
                          cudaGetErrorName(status), cudaGetErrorString(status));
         }
-        (void)cudaFree(device_words_[rank]);
     }
-    (void)cudaFreeHost(slab_);
+    release();
 }
 
 bool PeerMailbox::serves(const ExecutionContext& ec) const noexcept {
@@ -173,9 +189,10 @@ bool PeerMailbox::serves(const ExecutionContext& ec) const noexcept {
     return ec.dev[0]->device == devices_[0] && ec.dev[1]->device == devices_[1];
 }
 
-int PeerMailbox::take_capture_slot() noexcept {
-    const int slot = next_slot_;
-    next_slot_     = (next_slot_ + 1) % slots_;
+int PeerMailbox::take_capture_slot(std::size_t bytes) noexcept {
+    SlotSet& set   = sets_[set_for(bytes)];
+    const int slot = set.next_slot;
+    set.next_slot  = (set.next_slot + 1) % slots_;
     return slot;
 }
 
@@ -184,32 +201,33 @@ void PeerMailbox::enqueue_exchange_sum(int rank, int slot, void* data, std::size
     if (rank < 0 || rank > 1 || slot < 0 || slot >= slots_) {
         throw std::invalid_argument("PeerMailbox: rank or slot out of range");
     }
-    if (bytes == 0 || bytes > slot_bytes_ || (bytes % sizeof(detail::PeerVec)) != 0 ||
+    const SlotSet& set = sets_[set_for(bytes)];
+    if (bytes == 0 || bytes > set.slot_bytes || (bytes % sizeof(detail::PeerVec)) != 0 ||
         (reinterpret_cast<std::uintptr_t>(data) % sizeof(detail::PeerVec)) != 0) {
         throw std::invalid_argument(
             "PeerMailbox: an exchange carries whole, aligned 16-byte vectors within one slot");
     }
-    const std::size_t offset    = static_cast<std::size_t>(slot) * slot_bytes_;
-    const std::size_t lane_base = static_cast<std::size_t>(slot) * static_cast<std::size_t>(lanes_);
+    const std::size_t offset    = static_cast<std::size_t>(slot) * set.slot_bytes;
+    const std::size_t lane_base = static_cast<std::size_t>(slot) * static_cast<std::size_t>(set.lanes);
     const std::size_t flag_slot = lane_base * detail::kPeerFlagStride;
     const std::size_t vecs      = bytes / sizeof(detail::PeerVec);
-    std::uint32_t* words        = device_words_[rank];
+    std::uint32_t* words        = set.device_words[rank];
     auto* partial               = static_cast<detail::PeerVecBf16*>(data);
-    auto* mine_payload          = reinterpret_cast<detail::PeerVecBf16*>(payload_[rank] + offset);
+    auto* mine_payload = reinterpret_cast<detail::PeerVecBf16*>(set.payload[rank] + offset);
     const auto* peer_payload =
-        reinterpret_cast<const detail::PeerVecBf16*>(payload_[1 - rank] + offset);
+        reinterpret_cast<const detail::PeerVecBf16*>(set.payload[1 - rank] + offset);
     if (kernel_ == PeerExchangeKernel::Legacy) {
         detail::peer_exchange_sum_kernel<<<detail::peer_exchange_blocks(bytes), 256, 0, stream>>>(
-            partial, mine_payload, flags_[rank] + flag_slot, peer_payload,
-            flags_[1 - rank] + flag_slot, words + slots_ + slot, words + slot, hang_,
+            partial, mine_payload, set.flags[rank] + flag_slot, peer_payload,
+            set.flags[1 - rank] + flag_slot, words + slots_ + slot, words + slot, hang_,
             static_cast<int>(vecs));
     } else {
         constexpr int kVecsPerLane = detail::kPeerPipelinedVecsPerLane;
         constexpr int kThreads     = detail::kPeerPipelinedThreads;
         detail::peer_exchange_pipelined_kernel<kVecsPerLane>
             <<<detail::peer_pipelined_blocks(vecs, kVecsPerLane, kThreads), kThreads, 0, stream>>>(
-                partial, mine_payload, flags_[rank] + flag_slot, peer_payload,
-                flags_[1 - rank] + flag_slot, words + lane_base, hang_, static_cast<int>(vecs),
+                partial, mine_payload, set.flags[rank] + flag_slot, peer_payload,
+                set.flags[1 - rank] + flag_slot, words + lane_base, hang_, static_cast<int>(vecs),
                 detail::PeerPipelinedTuning{});
     }
     CUDA_CHECK(cudaGetLastError());

@@ -28,6 +28,15 @@
 // leak nothing. The only preconditions are those of every captured decode graph: its launches
 // are issued on one stream, and every launch executes each captured exchange on both devices.
 //
+// WIDE SLOTS. A mailbox can carry a second set of slots, wider, in a pinned allocation of its own
+// (`wide_slot_bytes`): an exchange that fits the ordinary slot takes an ordinary one, a wider one a
+// wide slot, each set with its own round robin, flags and epochs (the SLOT REUSE argument holds per
+// set: its consecutive exchanges alternate its two slots, and every exchange in between only adds
+// ordering). The Program sizes the ordinary slot for one request and the wide one for a full
+// batch: kept apart, the one-request exchanges run from the same small slab as without the wide
+// slots. Measured in the engine: 80 KiB exchanges from a 320 KiB-slot slab cost ~2 us more each
+// (+1.7 % per DFlash2 K=7 round at one request), which a slab of their own does not.
+//
 // FAULTS. A poller that waits too long for its peer (kPeerSpinLimit, qualified below the 2 s display
 // watchdog by test_allreduce) gives up, skips its combine and sets a sticky hang word;
 // hang_reported() exposes it to the owner, which fails that round and every later one.
@@ -55,11 +64,14 @@ public:
     // Allocates the pinned host slab (`slots` payload slots of `slot_bytes`, rounded up to 256
     // bytes, per rank; per slot and rank one 64-byte release line per warp lane of the pipelined
     // kernel, the original kernel using the first; the hang word) and each device's arrival and
-    // epoch words, and loads `kernel` on both devices so that no capture has to. Throws
-    // std::invalid_argument for a context without two distinct devices, fewer than two slots or
-    // an empty slot, and std::runtime_error on allocation failure.
+    // epoch words, and loads `kernel` on both devices so that no capture has to. A
+    // `wide_slot_bytes` above `slot_bytes` adds the wide slots (WIDE SLOTS above) in a second slab
+    // laid out the same way, sharing the hang word. Throws std::invalid_argument for a context
+    // without two distinct devices, fewer than two slots or an empty slot, and std::runtime_error
+    // on allocation failure.
     PeerMailbox(const ExecutionContext& ec, std::size_t slot_bytes, int slots = 2,
-                PeerExchangeKernel kernel = PeerExchangeKernel::Pipelined);
+                PeerExchangeKernel kernel = PeerExchangeKernel::Pipelined,
+                std::size_t wide_slot_bytes = 0);
     ~PeerMailbox();
 
     PeerMailbox(const PeerMailbox&)            = delete;
@@ -70,20 +82,31 @@ public:
     // True when this mailbox was created for `ec`'s device pair, in rank order.
     [[nodiscard]] bool serves(const ExecutionContext& ec) const noexcept;
 
+    // The largest payload an ordinary slot carries.
+    [[nodiscard]] std::size_t slot_bytes() const noexcept { return sets_[0].slot_bytes; }
+
+    // The largest payload a wide slot carries; 0 without wide slots.
+    [[nodiscard]] std::size_t wide_slot_bytes() const noexcept { return sets_[1].slot_bytes; }
+
     // The largest payload one exchange carries.
-    [[nodiscard]] std::size_t slot_bytes() const noexcept { return slot_bytes_; }
+    [[nodiscard]] std::size_t max_bytes() const noexcept {
+        return sets_[1].slot_bytes > sets_[0].slot_bytes ? sets_[1].slot_bytes
+                                                         : sets_[0].slot_bytes;
+    }
 
     // The exchange kernel every enqueue_exchange_sum() launches.
     [[nodiscard]] PeerExchangeKernel kernel() const noexcept { return kernel_; }
 
-    // The slot of the next captured exchange, round robin. Called once per captured call site,
-    // for both ranks together.
-    [[nodiscard]] int take_capture_slot() noexcept;
+    // The slot of the next captured exchange of `bytes`, round robin within the set that carries
+    // it (the ordinary slots when they fit, else the wide ones). Called once per captured call
+    // site, for both ranks together.
+    [[nodiscard]] int take_capture_slot(std::size_t bytes = 0) noexcept;
 
     // Enqueues rank `rank`'s half of the summing exchange of `bytes` (a multiple of 16, at most
-    // slot_bytes()) at the 16-byte aligned `data`, resident on that rank's device, onto `stream`.
-    // The caller issues both ranks' halves for one slot, with the same `bytes`, inside one
-    // capture, and makes `rank`'s device current.
+    // max_bytes()) at the 16-byte aligned `data`, resident on that rank's device, onto `stream`,
+    // in the set that carries `bytes`. The caller issues both ranks' halves for one slot taken by
+    // take_capture_slot(bytes), with the same `bytes`, inside one capture, and makes `rank`'s
+    // device current.
     void enqueue_exchange_sum(int rank, int slot, void* data, std::size_t bytes,
                               cudaStream_t stream) const;
 
@@ -96,17 +119,29 @@ public:
     void report_hang() noexcept;
 
 private:
-    void* slab_                     = nullptr; // pinned host allocation, UVA-mapped
-    std::uint8_t* payload_[2]       = {nullptr, nullptr};
-    std::uint32_t* flags_[2]        = {nullptr, nullptr}; // [slot][lane * kPeerFlagStride]
+    // One set of slots: its pinned slab (payloads, then flag lines; the ordinary set's also holds
+    // the hang word) and each device's arrival and epoch words.
+    struct SlotSet {
+        void* slab                     = nullptr; // pinned host allocation, UVA-mapped
+        std::uint8_t* payload[2]       = {nullptr, nullptr};
+        std::uint32_t* flags[2]        = {nullptr, nullptr}; // [slot][lane * kPeerFlagStride]
+        // Legacy: [arrival x slots][epoch x slots]. Pipelined: [slot][lane] epochs.
+        std::uint32_t* device_words[2] = {nullptr, nullptr};
+        std::size_t slot_bytes         = 0;
+        int lanes                      = 0; // pipelined warp lanes per slot (flag lines per slot)
+        int next_slot                  = 0;
+    };
+
+    // The set that carries `bytes`: the ordinary slots when they fit, else the wide ones.
+    [[nodiscard]] int set_for(std::size_t bytes) const noexcept {
+        return bytes <= sets_[0].slot_bytes || sets_[1].slot_bytes == 0 ? 0 : 1;
+    }
+    void release() noexcept;
+
+    SlotSet sets_[2];                    // ordinary, wide (slot_bytes 0: absent)
     std::uint32_t* hang_            = nullptr;
-    // Legacy: [arrival x slots][epoch x slots]. Pipelined: [slot][lane] epochs.
-    std::uint32_t* device_words_[2] = {nullptr, nullptr};
-    std::size_t slot_bytes_         = 0;
     int slots_                      = 0;
-    int lanes_                      = 0; // pipelined warp lanes per slot (flag lines per slot)
     PeerExchangeKernel kernel_      = PeerExchangeKernel::Pipelined;
-    int next_slot_                  = 0;
     int devices_[2]                 = {0, 0};
 };
 

@@ -96,7 +96,10 @@ mean TTFT is unchanged (prefill with prefix reuse dominates it) and the gain com
 
 Steady decode tok/s over the full wave, QUASAR weights; MTP acceptance 45-46%. C=1 is the only
 point where the pipelined mailbox kernel acts (see [below](#what-changed-since-the-earlier-run)):
-batched rounds exceed the mailbox slot and keep the staged path.
+batched rounds exceed the mailbox slot and keep the staged path. Since the mailbox's wide slots
+(after v0.4.0, [Two-GPU tensor parallelism](../maintainer/tensor-parallel.md#42-the-pinned-host-mailbox))
+the batched rounds take the mailbox too: at C=4 with the production flags, MTP3 −10.5 % and
+DFlash2 K=7 −10.6 % ms per round (development A/B, 2026-10-01); this table predates them.
 
 ## Context-length profile, no speculation (N0: NIAH fixtures, three seeds, 128 output tokens)
 
