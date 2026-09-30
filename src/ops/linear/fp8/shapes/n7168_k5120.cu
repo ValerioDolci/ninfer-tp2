@@ -54,8 +54,9 @@ void launch_a8(const Tensor& x, const Weight& weight, Tensor& out, Fp8A8Workspac
 bool uses_a8(std::int32_t, std::int32_t max_tokens) { return max_tokens >= 17; }
 
 std::size_t partial_capacity_bytes(std::int32_t max_tokens) {
-    // Up to three 128-token tiles occupy 168 CTAs and do not need split-K.
-    return max_tokens > 384 ? Bulk::kPartialBytes : 0;
+    // Unlike the parent's 56 row tiles, the half's 28 leave Bulk a split-K tail wave from its
+    // first width on (T=289: 84 tiles).
+    return max_tokens > 288 ? Bulk::kPartialBytes : 0;
 }
 } // namespace
 

@@ -16,6 +16,13 @@ std::size_t fp8_attn_input_partial_capacity_bytes(std::int32_t max_tokens) {
     return max_tokens > 384 ? Bulk::kPartialBytes : 0;
 }
 
+std::size_t fp8_attn_input_partial_capacity_bytes(std::int32_t rows, std::int32_t max_tokens) {
+    if (rows == Fp8AttnInputParent::Geometry::kOutputRows)
+        return fp8_attn_input_partial_capacity_bytes(max_tokens);
+    // 28 row tiles: Bulk splits its last wave from T=289 (84 tiles) on.
+    return max_tokens > 288 ? Bulk::kPartialBytes : 0;
+}
+
 void fp8_attn_input_a8_launch(const Tensor& x, const Weight& weight, Tensor& q, Tensor& gate,
                               Tensor& key, Tensor& value, Fp8A8Workspace workspace,
                               cudaStream_t stream) {
