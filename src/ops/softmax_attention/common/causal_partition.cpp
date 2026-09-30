@@ -1,6 +1,7 @@
 #include "ops/softmax_attention/common/causal_partition.h"
 
 #include "core/device.h" // CUDA_CHECK
+#include "core/tp2/device_tuning.h"
 
 #include <algorithm>
 #include <array>
@@ -14,14 +15,17 @@ constexpr int kMaxDevices = 64;
 // 0 = not queried yet. Concurrent first queries store the same value.
 std::array<std::atomic<int>, kMaxDevices> g_sm_counts{};
 
+// The device's SM count, or the per-GPU override of core/tp2/device_tuning.h.
 int device_sm_count(int device) {
     const bool tracked = device >= 0 && device < kMaxDevices;
     if (tracked) {
         const int cached = g_sm_counts[device].load(std::memory_order_relaxed);
         if (cached > 0) return cached;
     }
-    int count = 0;
-    CUDA_CHECK(cudaDeviceGetAttribute(&count, cudaDevAttrMultiProcessorCount, device));
+    int count = tp2::device_tuning(device).attention_sm_count;
+    if (count <= 0) {
+        CUDA_CHECK(cudaDeviceGetAttribute(&count, cudaDevAttrMultiProcessorCount, device));
+    }
     if (tracked) g_sm_counts[device].store(count, std::memory_order_relaxed);
     return count;
 }

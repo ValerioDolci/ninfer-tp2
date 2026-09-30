@@ -39,22 +39,6 @@ namespace workspace = execution::workspace;
 constexpr std::size_t kMiB        = 1024ULL * 1024ULL;
 constexpr std::size_t kArenaAlign = 256ULL;
 
-// Per-device CUDA Graph allowances at tp 2, per topology class and captured batch size; each rank
-// holds its half of one dual-device graph per class. They are max(3 x observed, 8 MiB), where
-// observed is the per-rank free memory prepare_graphs() consumed from before the warm-up (module
-// loading included) to after the graph upload, measured on two RTX 5070 Ti at 32K context, max
-// concurrency 1 and INT8 KV (2026-09):
-//   ordinary:                  2.0 / 2.0 MiB on rank 0 / 1 for its one class -> 8 MiB;
-//   MTP3:                      2.0 / 2.0 MiB for its one class -> 8 MiB;
-//   DFlash2 K=4 --lm-head-draft: 18.0 / 12.0 MiB for five classes (rank 0 also holds the
-//                              drafter), 3.6 MiB per class -> 10.8, rounded up to 11 MiB.
-// Every batch size up to max concurrency is warmed and captured, so the allowances scale linearly
-// with it; concurrency above 1 is not measured. The server logs observed against allowance per
-// rank and warns if a rank exceeds it.
-constexpr std::size_t kTp2OrdinaryGraphAllowance     = 8ULL * kMiB;
-constexpr std::size_t kTp2MtpGraphClassAllowance     = 8ULL * kMiB;
-constexpr std::size_t kTp2DFlash2GraphClassAllowance = 11ULL * kMiB;
-
 enum class GdnWorkspacePath : std::uint8_t {
     Prefill,
     Snapshot,
@@ -910,17 +894,22 @@ std::unique_ptr<SequencePlanImpl> build_sequence_candidate(const SequencePlannin
         // each reachable node-topology class. These bounds cover the largest profile installed in
         // each class and the driver/module state materialized while qualifying all definitions.
         if (impl->speculative_backend == SpeculativeBackend::None) {
-            // Per device; tp 2 uses its measured allowance (see kTp2OrdinaryGraphAllowance).
-            const std::size_t per_batch = impl->tp == 1 ? 12ULL * kMiB : kTp2OrdinaryGraphAllowance;
+            // Per device; tp 2 uses its measured allowance (core/tp2/device_tuning.h).
+            const std::size_t per_batch =
+                impl->tp == 1
+                    ? 12ULL * kMiB
+                    : tp2::device_tuning(impl->device).tp2_ordinary_graph_allowance_bytes;
             impl->graph_allowance_bytes =
                 checked_mul(per_batch, impl->max_concurrency, "ordinary exact-b graph allowance");
         } else if (impl->speculative_backend == SpeculativeBackend::Mtp) {
             const auto profiles = mtp_graph_profiles(impl->capacity, impl->draft_window);
-            // Per device; tp 2 uses its measured class allowance (see kTp2MtpGraphClassAllowance).
+            // Per device; tp 2 uses its measured class allowance (core/tp2/device_tuning.h).
             const std::size_t per_batch_allowance = graph_topology_allowance(
                 profiles,
                 [&](GraphExecutionProfile profile) -> std::size_t {
-                    if (impl->tp != 1) { return kTp2MtpGraphClassAllowance; }
+                    if (impl->tp != 1) {
+                        return tp2::device_tuning(impl->device).tp2_mtp_graph_class_allowance_bytes;
+                    }
                     const std::uint64_t final_visible = std::min<std::uint64_t>(
                         impl->capacity,
                         static_cast<std::uint64_t>(profile.max) + 2ULL * impl->draft_window);
@@ -935,9 +924,12 @@ std::unique_ptr<SequencePlanImpl> build_sequence_candidate(const SequencePlannin
             const auto per_batch_allowance = graph_topology_allowance(
                 profiles,
                 [&](GraphExecutionProfile profile) -> std::size_t {
-                    // Per device; tp 2 uses its measured class allowance (see
-                    // kTp2DFlash2GraphClassAllowance).
-                    if (impl->tp != 1) { return kTp2DFlash2GraphClassAllowance; }
+                    // Per device; tp 2 uses its measured class allowance
+                    // (core/tp2/device_tuning.h).
+                    if (impl->tp != 1) {
+                        return tp2::device_tuning(impl->device)
+                            .tp2_dflash2_graph_class_allowance_bytes;
+                    }
                     const std::uint64_t final_visible = std::min<std::uint64_t>(
                         impl->capacity,
                         static_cast<std::uint64_t>(profile.max) + impl->draft_window + 1ULL);

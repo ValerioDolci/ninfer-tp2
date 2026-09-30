@@ -10,3 +10,4 @@
 #include "models/qwen3_5/execution/tp2/mtp_split.h"
 #include "models/qwen3_5/execution/tp2/workspace_split.h"
 #include "models/qwen3_5/execution/tp.h"
+#include "core/tp2/device_tuning.h"
