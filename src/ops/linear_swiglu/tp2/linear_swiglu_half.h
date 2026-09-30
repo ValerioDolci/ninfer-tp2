@@ -39,8 +39,6 @@ void fp8_linear_swiglu_half_dispatch(const Tensor& x, const Weight& weight, Tens
                                      LinearPolicy policy, WorkspaceArena* workspace,
                                      cudaStream_t stream);
 
-void nvfp4_linear_swiglu_half_small_t_launch(const Tensor& x, const Weight& weight, Tensor& out,
-                                             cudaStream_t stream);
 void nvfp4_linear_swiglu_half_a4_launch(const Tensor& x, const Weight& weight, Tensor& out,
                                         WorkspaceArena& workspace, cudaStream_t stream);
 [[nodiscard]] std::size_t
