@@ -15,35 +15,26 @@
 namespace ninfer::ops::detail {
 namespace {
 
-// The two-device half [17408,5120] shares K with [34816,5120] and inherits its schedule; it was
-// not re-measured at the half.
-constexpr int kInputRows = Fp8N34816K5120::kInputRows;
+using Geometry = Fp8N34816K5120;
 using Schedule = Fp8A16SimtSchedule<4, 2, 16, 4, 1, Fp8SimtActivationAccess::TokenPacked,
                                     Fp8CodeCache::Default, 1, Fp8SimtBlockOrder::RowsContiguous, 1>;
-static_assert(Schedule::kRowsPerWarp == 2);
 
-// IntermediateRows is M = N/2 of the gate/up problem: gate rows [0,M) precede their up rows
-// [M,2M).
-template <int IntermediateRows>
-void launch(const Tensor& x, const Weight& weight, Tensor& out, cudaStream_t stream) {
-    static_assert((IntermediateRows % Schedule::kWarpsPerCta) == 0);
-    using Rows = Fp8SwiGluRows<Schedule::kRowsPerWarp / 2, IntermediateRows>;
-    if (x.ne[0] != kInputRows || x.ne[1] != 1 || out.ne[0] != IntermediateRows ||
-        out.ne[1] != 1 || weight.n != 2 * IntermediateRows || weight.k != kInputRows) {
-        throw std::invalid_argument("fp8 linear_swiglu decode: invalid exact problem");
-    }
-    const LinearBf16Output output{static_cast<__nv_bfloat16*>(out.data), IntermediateRows};
-    launch_fp8_a16_simt<Fp8ScheduleInstance<Schedule, kInputRows, 4>>(
-        fp8_a16_operands(x, weight), output, Fp8SwiGluEpilogue{}, stream, Rows{});
-}
+constexpr int kIntermediate = Geometry::kOutputRows / 2;
+static_assert(Schedule::kRowsPerWarp == 2);
+static_assert((kIntermediate % Schedule::kWarpsPerCta) == 0);
+using Rows = Fp8SwiGluRows<Schedule::kRowsPerWarp / 2, kIntermediate>;
 
 } // namespace
 
 void fp8_linear_swiglu_decode_launch(const Tensor& x, const Weight& weight, Tensor& out,
                                      cudaStream_t stream) {
-    visit_fp8_swiglu_intermediate_rows(weight.n, [&]<int IntermediateRows>() {
-        launch<IntermediateRows>(x, weight, out, stream);
-    });
+    if (x.ne[0] != Geometry::kInputRows || x.ne[1] != 1 || out.ne[0] != kIntermediate ||
+        out.ne[1] != 1 || weight.n != Geometry::kOutputRows || weight.k != Geometry::kInputRows) {
+        throw std::invalid_argument("fp8 linear_swiglu decode: invalid exact problem");
+    }
+    const LinearBf16Output output{static_cast<__nv_bfloat16*>(out.data), kIntermediate};
+    launch_fp8_a16_simt<Fp8ScheduleInstance<Schedule, Geometry::kInputRows, 4>>(
+        fp8_a16_operands(x, weight), output, Fp8SwiGluEpilogue{}, stream, Rows{});
 }
 
 } // namespace ninfer::ops::detail

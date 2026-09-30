@@ -14,9 +14,6 @@ namespace ninfer::ops::detail {
 
 [[nodiscard]] std::size_t fp8_linear_swiglu_partial_capacity_bytes(std::int32_t max_tokens);
 
-// The gate/up problems are [34816,5120] and its two-device output-row half [17408,5120]. They share
-// the input width, so the workspace does not depend on which one runs; the launchers below take the
-// problem from the weight's shape.
 [[nodiscard]] std::size_t fp8_linear_swiglu_workspace_capacity_bytes(LinearPolicy policy,
                                                                      std::int32_t min_tokens,
                                                                      std::int32_t max_tokens);

@@ -9,6 +9,7 @@
 #include "ops/linear_swiglu/nvfp4/nvfp4_linear_swiglu_plan.h"
 #include "ops/linear_swiglu/q4/q4_linear_swiglu_plan.h"
 #include "ops/linear_swiglu/q8/q8_linear_swiglu_plan.h"
+#include "ops/linear_swiglu/tp2/linear_swiglu_half.h"
 
 #include <cstdint>
 #include <stdexcept>
@@ -157,9 +158,17 @@ void dispatch_linear_swiglu(const Tensor& x, const Weight& gate_up_weight, Tenso
                             LinearPolicy policy, WorkspaceArena* ws, cudaStream_t stream) {
     switch (gate_up_weight.qtype) {
     case QType::FP8_E4M3FN_ROW_BF16:
+        if (gate_up_weight.n == kShardGateUpRows) {
+            return detail::fp8_linear_swiglu_half_dispatch(x, gate_up_weight, out, policy, ws,
+                                                           stream);
+        }
         detail::fp8_linear_swiglu_dispatch(x, gate_up_weight, out, policy, ws, stream);
         return;
     case QType::NVFP4:
+        if (gate_up_weight.n == kShardGateUpRows) {
+            return detail::nvfp4_linear_swiglu_half_dispatch(x, gate_up_weight, out, policy, ws,
+                                                             stream);
+        }
         detail::nvfp4_linear_swiglu_dispatch(x, gate_up_weight, out, policy, ws, stream);
         return;
     case QType::Q8_G32_FP16:

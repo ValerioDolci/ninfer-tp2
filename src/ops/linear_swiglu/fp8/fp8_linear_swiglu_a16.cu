@@ -14,9 +14,8 @@
 namespace ninfer::ops::detail {
 namespace {
 
-// The two-device half [17408,5120] shares K with [34816,5120] and inherits its schedules and token
-// cutoffs; they were not re-measured at the half.
-constexpr int kInputRows = Fp8N34816K5120::kInputRows;
+using Geometry              = Fp8N34816K5120;
+constexpr int kIntermediate = Geometry::kOutputRows / 2;
 } // namespace
 
 void fp8_linear_swiglu_small_t_launch(const Tensor& x, const Weight& weight, Tensor& out,
@@ -24,17 +23,13 @@ void fp8_linear_swiglu_small_t_launch(const Tensor& x, const Weight& weight, Ten
     using Schedule =
         Fp8A16SimtSchedule<4, 2, 16, 4, 1, Fp8SimtActivationAccess::TokenPacked,
                            Fp8CodeCache::Default, 1, Fp8SimtBlockOrder::RowsContiguous, 1>;
-    visit_fp8_swiglu_intermediate_rows(weight.n, [&]<int IntermediateRows>() {
-        using Rows = Fp8SwiGluRows<Schedule::kRowsPerWarp / 2, IntermediateRows>;
-        launch_fp8_a16_simt<Fp8ScheduleInstance<Schedule, kInputRows, 4>>(
-            fp8_a16_operands(x, weight),
-            LinearBf16Output{static_cast<__nv_bfloat16*>(out.data), IntermediateRows},
-            Fp8SwiGluEpilogue{}, stream, Rows{});
-    });
+    using Rows = Fp8SwiGluRows<Schedule::kRowsPerWarp / 2, kIntermediate>;
+    launch_fp8_a16_simt<Fp8ScheduleInstance<Schedule, Geometry::kInputRows, 4>>(
+        fp8_a16_operands(x, weight),
+        LinearBf16Output{static_cast<__nv_bfloat16*>(out.data), kIntermediate}, Fp8SwiGluEpilogue{},
+        stream, Rows{});
 }
 
-// SwiGluRowMajorMmaRows pairs gate row i with up row i + N/2 from the runtime row count, so these
-// instances serve both gate/up problems.
 void fp8_linear_swiglu_matrix_launch(const Tensor& x, const Weight& weight, Tensor& out,
                                      cudaStream_t stream) {
     const auto p = fp8_a16_operands(x, weight);

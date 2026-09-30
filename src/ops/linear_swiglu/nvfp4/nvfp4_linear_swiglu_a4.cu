@@ -4,7 +4,6 @@
 #include "core/device.h"
 #include "ops/common/math.cuh"
 #include "ops/common/memory.cuh"
-#include "ops/linear/nvfp4/nvfp4_geometry.h"
 #include "ops/linear/nvfp4/nvfp4_schedule.cuh"
 #include "ops/linear/common/epilogue.cuh"
 #include "ops/linear/common/vector_output.cuh"
@@ -19,31 +18,30 @@
 namespace ninfer::ops::detail {
 namespace {
 
-// The gate/up problems [34816,5120] and its two-device output-row half [17408,5120] share K, and
-// SwiGluTokenMajorMmaRows pairs gate row i with up row i + N/2 from the runtime row count, so each
-// instance serves both. The half inherits the parent's schedules and token cutoffs; they were not
-// re-measured at the half.
-constexpr int kInputRows = Nvfp4N34816K5120::kInputRows;
+using Geometry = Nvfp4N34816K5120;
 // Column tiles amortize gate/up decode over the complete speculative block.
 using M32N128  = Nvfp4A4MmaSchedule<32, 128, 256, 2, 4, 2, 1>;
 using M64N128  = Nvfp4A4MmaSchedule<64, 128, 256, 4, 4, 2, 1>;
 using M128N128 = Nvfp4A4MmaSchedule<128, 128, 256, 4, 4, 2, 1>;
 using M96N128  = Nvfp4A4MmaSchedule<96, 128, 256, 3, 4, 2, 1>;
 
+constexpr int kIntermediate = Geometry::kOutputRows / 2;
+
 template <class Schedule>
 void launch_gemm(const Weight& weight, Tensor& out, Nvfp4A4Workspace workspace, int tokens,
                  cudaStream_t stream) {
-    using S = Nvfp4ScheduleInstance<Schedule, kInputRows>;
+    using S = Nvfp4ScheduleInstance<Schedule, Geometry::kInputRows>;
     launch_nvfp4_a4_mma<S>(nvfp4_a4_operands(weight, workspace, tokens, Nvfp4ScaleLayout::RowMajor),
-                           LinearBf16Output{static_cast<__nv_bfloat16*>(out.data), weight.n / 2},
+                           LinearBf16Output{static_cast<__nv_bfloat16*>(out.data), kIntermediate},
                            SwiGluTokenMajorMmaEpilogue{}, stream, SwiGluTokenMajorMmaRows<S>{});
 }
 
 template <class Schedule>
 void launch(const Tensor& x, const Weight& weight, Tensor& out, WorkspaceArena& workspace,
             cudaStream_t stream) {
-    auto scope                     = workspace.scope();
-    const Nvfp4A4Workspace scratch = allocate_nvfp4_a4_workspace(workspace, x.ne[1], kInputRows);
+    auto scope = workspace.scope();
+    const Nvfp4A4Workspace scratch =
+        allocate_nvfp4_a4_workspace(workspace, x.ne[1], Geometry::kInputRows);
     launch_nvfp4_a4_quantize(x, weight, scratch, Nvfp4ScaleLayout::RowMajor, stream);
     launch_gemm<Schedule>(weight, out, scratch, x.ne[1], stream);
 }
