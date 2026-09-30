@@ -5,6 +5,8 @@
 // Two-device (tp 2) forms of attn_input_proj, declared in ninfer/ops/tp2/attn_input_proj.h.
 
 #include "ninfer/ops/tp2/attn_input_proj.h"
+#include "ops/attn_input_proj/tp2/fp8_attn_input_shard.h"
+#include "ops/attn_input_proj/tp2/nvfp4_attn_input_shard.h"
 #include "ops/common/split_launch.h"
 
 #include <array>
@@ -62,7 +64,8 @@ std::size_t attn_input_proj_column_parallel_workspace_capacity_bytes(QType shard
         return detail::fp8_attn_input_shard_workspace_capacity_bytes(policy, min_tokens,
                                                                      max_tokens);
     case QType::NVFP4:
-        return detail::nvfp4_attn_input_workspace_capacity_bytes(policy, min_tokens, max_tokens);
+        return detail::nvfp4_attn_input_shard_workspace_capacity_bytes(policy, min_tokens,
+                                                                       max_tokens);
     case QType::BF16:
     case QType::Q4_G64_FP16:
     case QType::Q5_G64_FP16:
@@ -105,13 +108,13 @@ void attn_input_proj_column_parallel(
     detail::for_each_rank(ec, [&](int rank) {
         const auto slot = static_cast<std::size_t>(rank);
         if (w[slot].qtype == QType::NVFP4) {
-            detail::nvfp4_attn_input_dispatch(x[slot], w[slot], q_out[slot], gate_out[slot],
-                                              k_out[slot], v_out[slot], policy, workspace[slot],
-                                              ec.dev[slot]->stream);
+            detail::nvfp4_attn_input_shard_dispatch(x[slot], w[slot], q_out[slot], gate_out[slot],
+                                                    k_out[slot], v_out[slot], policy,
+                                                    workspace[slot], ec.dev[slot]->stream);
         } else {
-            detail::fp8_attn_input_dispatch(x[slot], w[slot], q_out[slot], gate_out[slot],
-                                            k_out[slot], v_out[slot], policy, workspace[slot],
-                                            ec.dev[slot]->stream);
+            detail::fp8_attn_input_shard_dispatch(x[slot], w[slot], q_out[slot], gate_out[slot],
+                                                  k_out[slot], v_out[slot], policy,
+                                                  workspace[slot], ec.dev[slot]->stream);
         }
     });
 }

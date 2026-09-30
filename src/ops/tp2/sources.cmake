@@ -5,3 +5,22 @@ target_sources(ninfer_ops PRIVATE
   "${CMAKE_CURRENT_LIST_DIR}/../launcher/argmax_split.cu"
   "${CMAKE_CURRENT_LIST_DIR}/../launcher/concat_rows.cu"
 )
+
+# The two-device shards of upstream's fused projections: upstream's own sources compiled again
+# with the shard's section output and entry points (see each directory's *_shard.h).
+target_sources(ninfer_ops PRIVATE
+  "${CMAKE_CURRENT_LIST_DIR}/../attn_input_proj/tp2/fp8_attn_input_shard_decode.cu"
+  "${CMAKE_CURRENT_LIST_DIR}/../attn_input_proj/tp2/fp8_attn_input_shard_a16_small_t.cu"
+  "${CMAKE_CURRENT_LIST_DIR}/../attn_input_proj/tp2/fp8_attn_input_shard_a16_gemm.cu"
+  "${CMAKE_CURRENT_LIST_DIR}/../attn_input_proj/tp2/fp8_attn_input_shard_a8.cu"
+  "${CMAKE_CURRENT_LIST_DIR}/../attn_input_proj/tp2/fp8_attn_input_shard_plan.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/../attn_input_proj/tp2/nvfp4_attn_input_shard_decode.cu"
+  "${CMAKE_CURRENT_LIST_DIR}/../attn_input_proj/tp2/nvfp4_attn_input_shard_small_t.cu"
+  "${CMAKE_CURRENT_LIST_DIR}/../attn_input_proj/tp2/nvfp4_attn_input_shard_a16.cu"
+  "${CMAKE_CURRENT_LIST_DIR}/../attn_input_proj/tp2/nvfp4_attn_input_shard_a4.cu"
+  "${CMAKE_CURRENT_LIST_DIR}/../attn_input_proj/tp2/nvfp4_attn_input_shard_plan.cpp"
+)
+# Warp-specialized TMA kernels stay in the non-RDC archive, as upstream's (../CMakeLists.txt).
+target_sources(ninfer_nvfp4_non_rdc PRIVATE
+  "${CMAKE_CURRENT_LIST_DIR}/../attn_input_proj/tp2/nvfp4_attn_input_shard_a4_tma.cu"
+)

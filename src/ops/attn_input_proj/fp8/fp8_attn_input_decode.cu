@@ -10,16 +10,13 @@
 #include <cuda_bf16.h>
 
 namespace ninfer::ops::detail {
-namespace {
 
-template <class Problem>
-void launch(const Tensor& x, const Weight& weight, Tensor& q, Tensor& gate, Tensor& k, Tensor& v,
-            cudaStream_t stream) {
-    using Geometry = typename Problem::Geometry;
-    using Output   = typename Problem::Output;
+void fp8_attn_input_decode_launch(const Tensor& x, const Weight& weight, Tensor& q, Tensor& gate,
+                                  Tensor& k, Tensor& v, cudaStream_t stream) {
+    using Geometry = Fp8N14336K5120;
     // Keep six CTAs resident with the four-segment output (39 registers, no spills).
     using Schedule = Fp8A16GemvSchedule<8, 2, 8, 4, Fp8CodeCache::Default, 2, 6>;
-    const Output output{
+    const Fp8AttentionInputOutput output{
         static_cast<__nv_bfloat16*>(q.data),
         static_cast<__nv_bfloat16*>(k.data),
         static_cast<__nv_bfloat16*>(gate.data),
@@ -27,14 +24,6 @@ void launch(const Tensor& x, const Weight& weight, Tensor& q, Tensor& gate, Tens
     };
     launch_fp8_a16_gemv<Fp8ScheduleInstance<Schedule, Geometry::kInputRows>>(
         fp8_a16_operands(x, weight), output, LinearIdentityEpilogue{}, stream);
-}
-
-} // namespace
-
-void fp8_attn_input_decode_launch(const Tensor& x, const Weight& weight, Tensor& q, Tensor& gate,
-                                  Tensor& k, Tensor& v, cudaStream_t stream) {
-    visit_fp8_attn_input_problem(
-        weight.n, [&]<class Problem>() { launch<Problem>(x, weight, q, gate, k, v, stream); });
 }
 
 } // namespace ninfer::ops::detail

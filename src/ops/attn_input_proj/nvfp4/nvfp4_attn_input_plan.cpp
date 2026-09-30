@@ -36,7 +36,6 @@ std::size_t nvfp4_attn_input_workspace_capacity_bytes(LinearPolicy policy, std::
         throw std::invalid_argument("nvfp4 attn_input_proj workspace: invalid token interval");
     }
     (void)resolve_route(policy, min_tokens);
-    // The two-device [7168,5120] shard keeps the parent's K, so this capacity serves both.
     return resolve_route(policy, max_tokens) == Nvfp4AttnInputRoute::A4
                ? nvfp4_a4_workspace_capacity_bytes(max_tokens, Nvfp4N14336K5120::kInputRows)
                : 0;
