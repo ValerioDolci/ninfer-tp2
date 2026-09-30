@@ -36,8 +36,8 @@ using Fp8N5120K8704              = Fp8Geometry<5120, 8704>;
 // two-device half [5120,3072]) and over the MLP down projection ([5120,17408] and [5120,8704])
 // takes the A8 route. linear() over each half uses the same crossover, so rank 0's linear_add
 // and rank 1's linear() in one row-parallel pair always take the same route.
-inline constexpr std::int32_t kFp8OutputFamilyFirstA8Tokens = 22;
-inline constexpr std::int32_t kFp8DownFamilyFirstA8Tokens   = 25;
+inline constexpr std::int32_t kFp8OutputFamilyFirstA8Tokens = 17;
+inline constexpr std::int32_t kFp8DownFamilyFirstA8Tokens   = 20;
 using Fp8Activation3072Geometry  = Fp8ActivationGeometry<3072>;
 using Fp8Activation5120Geometry  = Fp8ActivationGeometry<5120>;
 using Fp8Activation6144Geometry  = Fp8ActivationGeometry<6144>;
