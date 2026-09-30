@@ -98,8 +98,9 @@ Steady decode tok/s over the full wave, QUASAR weights; MTP acceptance 45-46%. C
 point where the pipelined mailbox kernel acts (see [below](#what-changed-since-the-earlier-run)):
 batched rounds exceed the mailbox slot and keep the staged path. Since the mailbox's wide slots
 (after v0.4.0, [Two-GPU tensor parallelism](../maintainer/tensor-parallel.md#42-the-pinned-host-mailbox))
-the batched rounds take the mailbox too: at C=4 with the production flags, MTP3 −10.5 % and
-DFlash2 K=7 −10.6 % ms per round (development A/B, 2026-10-01); this table predates them.
+the batched rounds take the mailbox too: with the production flags, MTP3 −12.4 % / −10.4 % and
+DFlash2 K=7 −11.0 % / −10.5 % ms per round at C=2 / C=4, C=1 unchanged (development A/B,
+2026-10-01); this table predates them.
 
 ## Context-length profile, no speculation (N0: NIAH fixtures, three seeds, 128 output tokens)
 
