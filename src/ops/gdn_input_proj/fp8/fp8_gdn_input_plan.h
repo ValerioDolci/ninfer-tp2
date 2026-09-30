@@ -14,19 +14,10 @@
 namespace ninfer::ops::detail {
 
 [[nodiscard]] std::size_t fp8_gdn_input_partial_capacity_bytes(std::int32_t max_tokens);
-// The same for the problem with `rows` output rows: the [16384,5120] parent above, or the
-// [8192,5120] two-device shard, whose half as many row tiles leave a split-K tail wave from the
-// first bulk width on.
-[[nodiscard]] std::size_t fp8_gdn_input_partial_capacity_bytes(std::int32_t rows,
-                                                               std::int32_t max_tokens);
 
 [[nodiscard]] std::size_t fp8_gdn_input_workspace_capacity_bytes(LinearPolicy policy,
                                                                  std::int32_t min_tokens,
                                                                  std::int32_t max_tokens);
-// The [8192,5120] two-device shard's capacity: the parent's routes and its own split-K partials.
-[[nodiscard]] std::size_t fp8_gdn_input_shard_workspace_capacity_bytes(LinearPolicy policy,
-                                                                       std::int32_t min_tokens,
-                                                                       std::int32_t max_tokens);
 
 void fp8_gdn_input_decode_launch(const Tensor& x, const Weight& weight, Tensor& qkv, Tensor& z,
                                  cudaStream_t stream);
@@ -47,27 +38,5 @@ void fp8_gdn_input_a8_dispatch(const Tensor& x, const Weight& weight, Tensor& qk
 
 void fp8_gdn_input_dispatch(const Tensor& x, const Weight& weight, Tensor& qkv, Tensor& z,
                             LinearPolicy policy, WorkspaceArena* workspace, cudaStream_t stream);
-
-// Two-device shard: one rank's standalone [8192,5120] parent, Q|K|V|Z sections of 1024, 1024,
-// 3072 and 3072 rows, writing qkv [5120,T] and z [3072,T]. K is unchanged, so the route frontier
-// and the workspace query are those of the parent.
-void fp8_gdn_input_shard_decode_launch(const Tensor& x, const Weight& weight, Tensor& qkv,
-                                       Tensor& z, cudaStream_t stream);
-
-void fp8_gdn_input_shard_matrix_launch(const Tensor& x, const Weight& weight, Tensor& qkv,
-                                       Tensor& z, cudaStream_t stream);
-
-void fp8_gdn_input_shard_a8_launch(const Tensor& x, const Weight& weight, Tensor& qkv, Tensor& z,
-                                   Fp8A8Workspace workspace, cudaStream_t stream);
-
-void fp8_gdn_input_shard_a16_dispatch(const Tensor& x, const Weight& weight, Tensor& qkv, Tensor& z,
-                                      cudaStream_t stream);
-
-void fp8_gdn_input_shard_a8_dispatch(const Tensor& x, const Weight& weight, Tensor& qkv, Tensor& z,
-                                     WorkspaceArena& workspace, cudaStream_t stream);
-
-void fp8_gdn_input_shard_dispatch(const Tensor& x, const Weight& weight, Tensor& qkv, Tensor& z,
-                                  LinearPolicy policy, WorkspaceArena* workspace,
-                                  cudaStream_t stream);
 
 } // namespace ninfer::ops::detail

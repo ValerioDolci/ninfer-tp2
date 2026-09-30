@@ -4,17 +4,20 @@
 #include "ops/gdn_input_proj/nvfp4/nvfp4_gdn_input_output.cuh"
 
 namespace ninfer::ops::detail {
-namespace {
-
-// The two-device [8192,5120] shard shares the parent's K, so it runs the parent's token cutoffs
-// and schedules with its own section output (inherited, not re-measured at the shard).
-template <class Output>
-void launch_matrix(const Tensor& x, const Weight& weight, Tensor& qkv, Tensor& z,
-                   cudaStream_t stream) {
-    const int tokens    = x.ne[1];
+void nvfp4_gdn_input_a16_launch(const Tensor& x, const Weight& weight, Tensor& qkv, Tensor& z,
+                                cudaStream_t stream) {
+    const int tokens = x.ne[1];
+    if (tokens == 1) {
+        nvfp4_gdn_input_decode_launch(x, weight, qkv, z, stream);
+        return;
+    }
+    if (tokens <= 2) {
+        nvfp4_gdn_input_small_t_launch(x, weight, qkv, z, stream);
+        return;
+    }
     const auto p        = nvfp4_a16_operands(x, weight);
-    const auto output   = Output{static_cast<__nv_bfloat16*>(qkv.data),
-                                 static_cast<__nv_bfloat16*>(z.data)};
+    const auto output   = Nvfp4GdnInputOutput{static_cast<__nv_bfloat16*>(qkv.data),
+                                            static_cast<__nv_bfloat16*>(z.data)};
     const auto epilogue = LinearIdentityEpilogue{};
     if (tokens <= 8) {
         launch_nvfp4_a16_sliced_k_mma<Nvfp4ScheduleInstance<Nvfp4SlicedInstance<8, 8, 2>, 5120>>(
@@ -54,23 +57,5 @@ void launch_matrix(const Tensor& x, const Weight& weight, Tensor& qkv, Tensor& z
             p, output, epilogue, stream);
         return;
     }
-}
-
-} // namespace
-
-void nvfp4_gdn_input_a16_launch(const Tensor& x, const Weight& weight, Tensor& qkv, Tensor& z,
-                                cudaStream_t stream) {
-    const int tokens = x.ne[1];
-    if (tokens == 1) {
-        nvfp4_gdn_input_decode_launch(x, weight, qkv, z, stream);
-        return;
-    }
-    if (tokens <= 2) {
-        nvfp4_gdn_input_small_t_launch(x, weight, qkv, z, stream);
-        return;
-    }
-    visit_nvfp4_gdn_input_output(weight.n, [&]<class Output>() {
-        launch_matrix<Output>(x, weight, qkv, z, stream);
-    });
 }
 } // namespace ninfer::ops::detail

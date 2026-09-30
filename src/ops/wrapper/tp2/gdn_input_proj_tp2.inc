@@ -5,6 +5,8 @@
 // Two-device (tp 2) forms of gdn_input_proj, declared in ninfer/ops/tp2/gdn_input_proj.h.
 
 #include "ninfer/ops/tp2/gdn_input_proj.h"
+#include "ops/gdn_input_proj/tp2/fp8_gdn_input_shard.h"
+#include "ops/gdn_input_proj/tp2/nvfp4_gdn_input_shard.h"
 #include "ops/common/split_launch.h"
 
 #include <cstddef>
@@ -47,7 +49,8 @@ void require_shard_weight(const Weight& weight, const char* operation) {
 std::size_t shard_projection_bytes(QType qtype, LinearPolicy policy, std::int32_t min_tokens,
                                    std::int32_t max_tokens) {
     return qtype == QType::NVFP4
-               ? detail::nvfp4_gdn_input_workspace_capacity_bytes(policy, min_tokens, max_tokens)
+               ? detail::nvfp4_gdn_input_shard_workspace_capacity_bytes(policy, min_tokens,
+                                                                        max_tokens)
                : detail::fp8_gdn_input_shard_workspace_capacity_bytes(policy, min_tokens,
                                                                       max_tokens);
 }
@@ -78,7 +81,7 @@ void project_conv_shard(const Tensor& x, const Weight& weight, Tensor& projected
                         cudaStream_t stream) {
     const bool quantized = conv_shard_quantizes(weight.qtype, policy, geometry);
     if (weight.qtype == QType::NVFP4) {
-        detail::nvfp4_gdn_input_dispatch(
+        detail::nvfp4_gdn_input_shard_dispatch(
             x, weight, projected, z, quantized ? LinearPolicy::AllowA4 : LinearPolicy::A16Only,
             &workspace, stream);
     } else if (quantized) {
@@ -98,7 +101,7 @@ std::size_t conv_shard_projection_bytes(QType qtype, LinearPolicy policy, std::i
     }
     return detail::fp8_a8_workspace_capacity_bytes(
         columns, kShardHidden,
-        detail::fp8_gdn_input_partial_capacity_bytes(detail::Fp8N8192K5120::kOutputRows, columns));
+        detail::fp8_gdn_input_shard_partial_capacity_bytes(columns));
 }
 
 } // namespace
@@ -148,8 +151,9 @@ void gdn_input_proj_column_parallel(const std::array<Tensor, 2>& x,
         Tensor qkv_out  = qkv[slot];
         Tensor z_out    = z[slot];
         if (query_key_value_z_weight[slot].qtype == QType::NVFP4) {
-            detail::nvfp4_gdn_input_dispatch(x[slot], query_key_value_z_weight[slot], qkv_out,
-                                             z_out, policy, workspace[slot], ec.dev[slot]->stream);
+            detail::nvfp4_gdn_input_shard_dispatch(x[slot], query_key_value_z_weight[slot],
+                                                   qkv_out, z_out, policy, workspace[slot],
+                                                   ec.dev[slot]->stream);
         } else {
             detail::fp8_gdn_input_shard_dispatch(x[slot], query_key_value_z_weight[slot], qkv_out,
                                                  z_out, policy, workspace[slot],

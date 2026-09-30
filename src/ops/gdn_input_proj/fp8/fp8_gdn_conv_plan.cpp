@@ -107,11 +107,6 @@ Fp8GdnConvPlan fp8_gdn_record_resolve_plan(LinearPolicy policy, std::int32_t wid
 
 } // namespace
 
-bool fp8_gdn_conv_uses_a8(LinearPolicy policy, std::int32_t width, std::int32_t batch_size) {
-    return fp8_gdn_snapshot_resolve_plan(policy, width, batch_size).schedule ==
-           Fp8GdnConvScheduleId::MaterializedA8;
-}
-
 std::size_t fp8_gdn_snapshot_workspace_capacity_bytes(LinearPolicy policy, std::int32_t batch_size,
                                                       std::int32_t min_width,
                                                       std::int32_t max_width) {
@@ -211,3 +206,5 @@ void fp8_gdn_record_dispatch(const Tensor& x, const Weight& weight, const Tensor
 }
 
 } // namespace ninfer::ops::detail
+
+#include "ops/gdn_input_proj/tp2/fp8_gdn_conv_plan_tp2.inc"

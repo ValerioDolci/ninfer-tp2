@@ -15,7 +15,7 @@ namespace {
 
 using Launch = void (*)(const Tensor&, const Weight&, Tensor&, Tensor&, cudaStream_t);
 
-template <class Output, int ActiveTokens>
+template <int ActiveTokens>
 void launch_exact(const Tensor& x, const Weight& weight, Tensor& qkv, Tensor& z,
                   cudaStream_t stream) {
     using Geometry = Nvfp4N16384K5120;
@@ -29,27 +29,23 @@ void launch_exact(const Tensor& x, const Weight& weight, Tensor& qkv, Tensor& z,
     launch_nvfp4_a16_simt<
         Nvfp4ScheduleInstance<Schedule, Geometry::kInputRows, ActiveTokens, true>>(
         nvfp4_a16_operands(x, weight),
-        Output{static_cast<__nv_bfloat16*>(qkv.data), static_cast<__nv_bfloat16*>(z.data)},
+        Nvfp4GdnInputOutput{static_cast<__nv_bfloat16*>(qkv.data),
+                            static_cast<__nv_bfloat16*>(z.data)},
         LinearIdentityEpilogue{}, stream);
 }
 
-template <class Output, std::size_t... Offsets>
+template <std::size_t... Offsets>
 constexpr auto make_launchers(std::index_sequence<Offsets...>) {
-    return std::array<Launch, sizeof...(Offsets)>{
-        &launch_exact<Output, 2 + static_cast<int>(Offsets)>...};
+    return std::array<Launch, sizeof...(Offsets)>{&launch_exact<2 + static_cast<int>(Offsets)>...};
 }
 
-// The [16384,5120] parent and its two-device [8192,5120] shard share K and these schedules.
-template <class Output>
-constexpr auto kLaunchers = make_launchers<Output>(std::make_index_sequence<2 - 2 + 1>{});
+constexpr auto kLaunchers = make_launchers(std::make_index_sequence<2 - 2 + 1>{});
 
 } // namespace
 
 void nvfp4_gdn_input_small_t_launch(const Tensor& x, const Weight& weight, Tensor& qkv, Tensor& z,
                                     cudaStream_t stream) {
-    visit_nvfp4_gdn_input_output(weight.n, [&]<class Output>() {
-        kLaunchers<Output>[x.ne[1] - 2](x, weight, qkv, z, stream);
-    });
+    kLaunchers[x.ne[1] - 2](x, weight, qkv, z, stream);
 }
 
 } // namespace ninfer::ops::detail
