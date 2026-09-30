@@ -18,7 +18,8 @@ namespace {
 // The two-device half [17408,5120] shares K with [34816,5120] and inherits its schedule; it was
 // not re-measured at the half.
 constexpr int kInputRows = Fp8N34816K5120::kInputRows;
-using Schedule           = Fp8A16GemvSchedule<8, 2, 8, 4, Fp8CodeCache::Default, 2, 2>;
+using Schedule = Fp8A16SimtSchedule<4, 2, 16, 4, 1, Fp8SimtActivationAccess::TokenPacked,
+                                    Fp8CodeCache::Default, 1, Fp8SimtBlockOrder::RowsContiguous, 1>;
 static_assert(Schedule::kRowsPerWarp == 2);
 
 // IntermediateRows is M = N/2 of the gate/up problem: gate rows [0,M) precede their up rows
@@ -32,7 +33,7 @@ void launch(const Tensor& x, const Weight& weight, Tensor& out, cudaStream_t str
         throw std::invalid_argument("fp8 linear_swiglu decode: invalid exact problem");
     }
     const LinearBf16Output output{static_cast<__nv_bfloat16*>(out.data), IntermediateRows};
-    launch_fp8_a16_gemv<Fp8ScheduleInstance<Schedule, kInputRows>>(
+    launch_fp8_a16_simt<Fp8ScheduleInstance<Schedule, kInputRows, 4>>(
         fp8_a16_operands(x, weight), output, Fp8SwiGluEpilogue{}, stream, Rows{});
 }
 

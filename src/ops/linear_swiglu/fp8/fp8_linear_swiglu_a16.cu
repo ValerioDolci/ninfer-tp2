@@ -9,10 +9,7 @@
 #include "ops/linear/fp8/fp8_a16_simt.cuh"
 #include "ops/linear_swiglu/fp8/fp8_linear_swiglu_output.cuh"
 
-#include <array>
-#include <cstddef>
 #include <stdexcept>
-#include <utility>
 
 namespace ninfer::ops::detail {
 namespace {
@@ -20,44 +17,19 @@ namespace {
 // The two-device half [17408,5120] shares K with [34816,5120] and inherits its schedules and token
 // cutoffs; they were not re-measured at the half.
 constexpr int kInputRows = Fp8N34816K5120::kInputRows;
-using Launch             = void (*)(const Tensor&, const Weight&, Tensor&, cudaStream_t);
-
-// IntermediateRows is M = N/2 of the gate/up problem: gate rows [0,M) precede their up rows
-// [M,2M).
-template <int IntermediateRows, int ActiveTokens>
-void launch_exact(const Tensor& x, const Weight& weight, Tensor& out, cudaStream_t stream) {
-    using Schedule =
-        Fp8A16SimtSchedule<8, 2, ActiveTokens == 4 ? 8 : 16, ActiveTokens, 1,
-                           ActiveTokens <= 3 ? Fp8SimtActivationAccess::SharedPhase
-                                             : Fp8SimtActivationAccess::TokenPacked,
-                           Fp8CodeCache::Default, 1, Fp8SimtBlockOrder::RowsContiguous, 1>;
-    static_assert((Schedule::kRowsPerWarp % 2) == 0);
-    using Rows = Fp8SwiGluRows<Schedule::kRowsPerWarp / 2, IntermediateRows>;
-    launch_fp8_a16_simt<Fp8ScheduleInstance<Schedule, kInputRows, ActiveTokens, true>>(
-        fp8_a16_operands(x, weight),
-        LinearBf16Output{static_cast<__nv_bfloat16*>(out.data), IntermediateRows},
-        Fp8SwiGluEpilogue{}, stream, Rows{});
-}
-
-template <int IntermediateRows, std::size_t... Offsets>
-constexpr auto make_launchers(std::index_sequence<Offsets...>) {
-    return std::array<Launch, sizeof...(Offsets)>{
-        &launch_exact<IntermediateRows, 2 + static_cast<int>(Offsets)>...};
-}
-
-template <int IntermediateRows>
-constexpr auto kLaunchers = make_launchers<IntermediateRows>(std::make_index_sequence<4 - 2 + 1>{});
-
 } // namespace
 
 void fp8_linear_swiglu_small_t_launch(const Tensor& x, const Weight& weight, Tensor& out,
                                       cudaStream_t stream) {
-    if (x.ne[1] < 2 || x.ne[1] > 4) {
-        throw std::invalid_argument("fp8 linear_swiglu small-T: unsupported T");
-    }
-    const auto index = static_cast<std::size_t>(x.ne[1] - 2);
+    using Schedule =
+        Fp8A16SimtSchedule<4, 2, 16, 4, 1, Fp8SimtActivationAccess::TokenPacked,
+                           Fp8CodeCache::Default, 1, Fp8SimtBlockOrder::RowsContiguous, 1>;
     visit_fp8_swiglu_intermediate_rows(weight.n, [&]<int IntermediateRows>() {
-        kLaunchers<IntermediateRows>[index](x, weight, out, stream);
+        using Rows = Fp8SwiGluRows<Schedule::kRowsPerWarp / 2, IntermediateRows>;
+        launch_fp8_a16_simt<Fp8ScheduleInstance<Schedule, kInputRows, 4>>(
+            fp8_a16_operands(x, weight),
+            LinearBf16Output{static_cast<__nv_bfloat16*>(out.data), IntermediateRows},
+            Fp8SwiGluEpilogue{}, stream, Rows{});
     });
 }
 

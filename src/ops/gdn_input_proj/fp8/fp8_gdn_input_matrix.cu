@@ -16,19 +16,6 @@ namespace {
 // token cutoffs with its own section output (inherited, not re-measured at the shard).
 using Geometry = Fp8N16384K5120;
 
-template <class Output, int ActiveTokens>
-void launch_exact(const Tensor& x, const Weight& weight, Tensor& qkv, Tensor& z,
-                  cudaStream_t stream) {
-    using Schedule =
-        Fp8A16SimtSchedule<8, 2, (ActiveTokens >= 5 && ActiveTokens <= 6) ? 8 : 16, ActiveTokens, 1,
-                           ActiveTokens <= 4 ? Fp8SimtActivationAccess::SharedPhase
-                                             : Fp8SimtActivationAccess::TokenPacked,
-                           Fp8CodeCache::Default, 1, Fp8SimtBlockOrder::RowsContiguous, 1>;
-    const Output output{static_cast<__nv_bfloat16*>(qkv.data), static_cast<__nv_bfloat16*>(z.data)};
-    launch_fp8_a16_simt<Fp8ScheduleInstance<Schedule, Geometry::kInputRows, ActiveTokens, true>>(
-        fp8_a16_operands(x, weight), output, LinearIdentityEpilogue{}, stream);
-}
-
 template <class Output, int Capacity>
 void launch_small_mma(const Tensor& x, const Weight& weight, Tensor& qkv, Tensor& z,
                       cudaStream_t stream) {
@@ -56,13 +43,22 @@ void launch_gemm(const Tensor& x, const Weight& weight, Tensor& qkv, Tensor& z,
 template <class Output>
 void launch_matrix(const Tensor& x, const Weight& weight, Tensor& qkv, Tensor& z,
                    cudaStream_t stream) {
-    // SIMT for the latency regime, bounded MMA column capacities, then amortized weight decode.
+    // CTA-local K reduction through16, then bounded A16-only matrix tiles.
     const int columns = x.ne[1];
-    if (columns == 2) return launch_exact<Output, 2>(x, weight, qkv, z, stream);
-    if (columns == 3) return launch_exact<Output, 3>(x, weight, qkv, z, stream);
-    if (columns == 4) return launch_exact<Output, 4>(x, weight, qkv, z, stream);
-    if (columns <= 8) return launch_small_mma<Output, 8>(x, weight, qkv, z, stream);
-    if (columns <= 16) return launch_small_mma<Output, 16>(x, weight, qkv, z, stream);
+    const Output output{static_cast<__nv_bfloat16*>(qkv.data), static_cast<__nv_bfloat16*>(z.data)};
+    if (columns <= 4) {
+        using Schedule =
+            Fp8A16SimtSchedule<8, 2, 16, 4, 1, Fp8SimtActivationAccess::SharedPhase,
+                               Fp8CodeCache::Default, 1, Fp8SimtBlockOrder::RowsContiguous, 1>;
+        return launch_fp8_a16_simt<Fp8ScheduleInstance<Schedule, 5120, 4>>(
+            fp8_a16_operands(x, weight), output, LinearIdentityEpilogue{}, stream);
+    }
+    if (columns <= 16) {
+        using Schedule = Fp8A16SlicedKMmaSchedule<4, 16, 7, Cache::ca, Cache::cg,
+                                                  Fp8ActivationStage::PaddedZero, 1>;
+        return launch_fp8_a16_sliced_k_mma<Fp8ScheduleInstance<Schedule, 5120>>(
+            fp8_a16_operands(x, weight), output, LinearIdentityEpilogue{}, stream);
+    }
     if (columns <= 24) return launch_small_mma<Output, 24>(x, weight, qkv, z, stream);
     if (columns <= 32) return launch_small_mma<Output, 32>(x, weight, qkv, z, stream);
     if (columns <= 64)

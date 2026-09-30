@@ -39,7 +39,6 @@ Fp8LinearAddRoute resolve_route(std::int32_t output_rows, std::int32_t input_row
 
 void launch_a16(const Tensor& x, const Weight& weight, Tensor& residual, cudaStream_t stream) {
     if (x.ne[1] == 1) return fp8_linear_add_decode_launch(x, weight, residual, stream);
-    if (x.ne[1] <= 4) return fp8_linear_add_small_t_launch(x, weight, residual, stream);
     fp8_linear_add_matrix_launch(x, weight, residual, stream);
 }
 
@@ -54,7 +53,9 @@ std::size_t fp8_linear_add_workspace_capacity_bytes(std::int32_t output_rows,
     }
     (void)resolve_route(output_rows, input_rows, policy, min_tokens);
     return resolve_route(output_rows, input_rows, policy, max_tokens) == Fp8LinearAddRoute::A8
-               ? fp8_a8_workspace_capacity_bytes(max_tokens, input_rows)
+               ? fp8_a8_workspace_capacity_bytes(
+                     max_tokens, input_rows,
+                     fp8_linear_add_partial_capacity_bytes(input_rows, max_tokens))
                : 0;
 }
 
