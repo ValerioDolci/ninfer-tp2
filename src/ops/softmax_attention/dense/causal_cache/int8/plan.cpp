@@ -1,4 +1,5 @@
 #include "ops/softmax_attention/dense/causal_cache/int8/plan.h"
+#include "ops/softmax_attention/dense/causal_cache/int8/instances.h"
 #include "ops/softmax_attention/dense/causal_cache/int8/operands.h"
 #include <algorithm>
 #include <stdexcept>
@@ -6,6 +7,36 @@
 namespace ninfer::ops::detail {
 namespace {
 constexpr int kGroupedPrefillMaxWidth = 256;
+
+struct GroupedShape {
+    int resident_ctas; // CTAs per SM guaranteed by the schedule's launch bound
+    int key_shift;     // log2 of the schedule's key tile, the smallest split
+};
+
+template <class G>
+GroupedShape grouped_shape(int tokens) {
+    const auto of = []<int Tokens>() {
+        using S = typename Int8KvGroupedInstance<G, Tokens>::Schedule;
+        static_assert(S::kKeyRows == 32 || S::kKeyRows == 64);
+        return GroupedShape{S::kMinBlocks, S::kKeyRows == 32 ? 5 : 6};
+    };
+    switch (tokens) {
+    case 1: return of.template operator()<1>();
+    case 2: return of.template operator()<2>();
+    case 3: return of.template operator()<3>();
+    case 4: return of.template operator()<4>();
+    case 5: return of.template operator()<5>();
+    case 6: return of.template operator()<6>();
+    case 7: return of.template operator()<7>();
+    default: return of.template operator()<8>();
+    }
+}
+
+GroupedShape grouped_shape(int heads, int tokens) {
+    if (heads == 24) return grouped_shape<CausalD256H24Kv4>(tokens);
+    if (heads == 12) return grouped_shape<CausalD256H12Kv2>(tokens);
+    return grouped_shape<CausalD256H16Kv2>(tokens);
+}
 } // namespace
 
 Int8KvCausalPlan make_int8_kv_causal_plan(int heads, int width, int batch,
@@ -23,18 +54,20 @@ Int8KvCausalPlan make_int8_kv_causal_plan(int heads, int width, int batch,
     const int tiles =
         family == Int8KvFamily::ParallelGrouped ? (width + grouped_limit - 1) / grouped_limit : 1;
     const int independent_tiles = batch * (heads == 24 ? 4 : 2) * tiles;
-    const int wave_ctas         = (sms / independent_tiles) * independent_tiles;
-    // Budgets count the launching device's SMs. The 12/2 and 24/4 grouped schedules keep two CTAs
-    // per SM (launch bound), so 2 * sms is one full wave; the fixed 5090 count (340 CTAs) left 2.4
-    // waves on a 70-SM RTX 5070 Ti. 12/2, one device's half of 24/4 at tp 2, has 24/4's group of
-    // six and therefore its CTA shape, wave budget and split granularity. Measured at 12/2 on the
-    // 5070 Ti: 1, 1.5, 3 and 4 * sms budgets and key shifts one step either way do not beat this.
-    const int budget = heads != 16 || width <= 4 || wave_ctas < sms * 9 / 10 ? 2 * sms : sms;
-    CausalKvPartition partition{
-        1, std::clamp(budget / independent_tiles, 1, CausalKvPartition::kMaxSplits)};
-    // Bound partial traffic by keeping enough KV work in each split.
-    partition.key_shift = (width == 1 ? 7 : 8) - (heads == 16 ? 1 : 0);
-    partition.capacity  = partition.active(envelope.max_visible_keys);
+    const auto shape =
+        grouped_shape(heads, family == Int8KvFamily::Grouped ? width : grouped_limit);
+    // Split rule: a row takes as many splits as it has key tiles, up to one wave of the launching
+    // device (the schedule's resident CTAs per SM times its SMs, shared with the other rows, KV
+    // heads and query tiles). Past one wave the partition is balanced: the fewest splits that
+    // keep the longest one as short as a full wave would. A short row thus runs one key tile per
+    // CTA instead of queueing behind the 128/256-key floor this replaces (4-8 tiles per split,
+    // tuned for a 170-SM wave); a long row fills exactly one wave. More than one wave never
+    // shortens the critical path, since 2 * ceil(n / 2w) >= ceil(n / w) key tiles.
+    CausalKvPartition partition{1, std::clamp(shape.resident_ctas * sms / independent_tiles, 1,
+                                              CausalKvPartition::kMaxSplits)};
+    partition.key_shift = shape.key_shift;
+    partition.balanced  = true;
+    partition.capacity  = partition.bound(envelope.max_visible_keys);
     return {family, heads, width, batch, envelope, partition};
 }
 
