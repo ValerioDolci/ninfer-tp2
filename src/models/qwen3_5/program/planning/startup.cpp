@@ -2,7 +2,7 @@
 #include "models/qwen3_5/execution/ffn.h"
 #include "models/qwen3_5/execution/gdn.h"
 #include "models/qwen3_5/execution/mtp.h"
-#include "models/qwen3_5/execution/tp.h"
+#include "models/qwen3_5/execution/tp2/split.h"
 #include "models/qwen3_5/program/planning/graph_profiles.h"
 #include "models/qwen3_5/program/internal.h"
 #include "models/qwen3_5/program/planning/startup.h"

@@ -1,7 +1,7 @@
 #include "models/qwen3_5/execution/tp.h"
 
 #include "core/device_scope.h"
-#include "models/qwen3_5/execution/linear.h"
+#include "models/qwen3_5/execution/tp2/linear_split.h"
 #include "ninfer/ops/argmax.h"
 #include "ops/launcher/concat_rows.h"
 
