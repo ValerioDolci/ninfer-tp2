@@ -710,6 +710,7 @@ struct SpeculativeStats {
     std::uint64_t drafted_tokens  = 0;
     std::uint64_t accepted_tokens = 0;
     std::uint64_t fallback_steps  = 0;
+    std::uint64_t ngram_rounds    = 0; // MTP rounds whose drafts came from the n-gram lookup
     std::vector<std::uint64_t> accepted_per_position;
 };
 

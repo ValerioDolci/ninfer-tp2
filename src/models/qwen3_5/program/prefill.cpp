@@ -985,6 +985,14 @@ runtime::ExecutionTiming ProgramImpl::resolve_pending_raw(
                         sequence.mtp_drafts[step] =
                             mtp_host_egress->next_drafts[step * max_concurrency + row];
                     }
+                    if (const int n = qwen3_5::detail::ngram_draft_order(); n > 0 && next > 0) {
+                        const std::uint32_t found = sequence.ngram.propose(
+                            sequence.ledger, n, draft_window, sequence.mtp_drafts);
+                        if (found > 0) {
+                            sequence.mtp_draft_count = found;
+                            request.speculative_stats.ngram_rounds += 1;
+                        }
+                    }
                 }
             } else {
                 sequence.dflash_context_frontier =
@@ -1291,6 +1299,7 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
             sequence.mtp_draft_count = staged.initial_mtp_extent;
             std::copy_n(initial_drafts.begin(), staged.initial_mtp_extent,
                         sequence.mtp_drafts.begin());
+            sequence.ngram.reset();
         } else if (is_masked_draft_backend(speculative_backend) &&
                    sequence.dflash_context_frontier != prompt_tokens) {
             throw std::logic_error("staged DFlash prefill did not reach the prompt frontier");
