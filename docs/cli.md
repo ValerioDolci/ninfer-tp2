@@ -328,11 +328,17 @@ keeps them on the staged copies. [`tools/tp2/mailbox_probe.cu`](../tools/README.
 checks the mailbox on a machine without loading a model.
 
 Tensor parallelism covers ordinary decoding, `--spec mtp` and `--spec dflash2` of the dense
-architecture with `bf16`, `int8` or `nvfp4` KV. The MTP head is split like a Text layer and verification
+architecture with `bf16`, `int8` or `nvfp4` KV. The `nvfp4` cache (v0.4.2) is about 1.8× denser than
+`int8`; measured on two RTX 5070 Ti with the QUASAR artifact it leaves ~2 GiB more per board at a
+262,144-token context with perplexity and GSM8K unchanged, and costs +4…8 % per decode round with
+MTP3 and +4…17 % with DFlash2 (whose acceptance also drops 10-15 points) from 55k to 210k prompt
+tokens. Keep `int8` where it fits; `nvfp4` buys KV capacity (`--kv-capacity` above `--max-context`
+for concurrent requests) or room for a larger artifact. `--max-context` cannot exceed the artifact's
+position capacity with either cache. The MTP head is split like a Text layer and verification
 runs on both ranks; `--draft-tokens` and `--lm-head-draft` work as on one GPU. The DFlash2 drafter
 runs on rank 0 alone and requires `--lm-head-draft`, since the full output head is split by
 vocabulary across the ranks; a drafter with full-attention layers is not supported.
-`--spec dflash`, the MoE architecture and the `fp8`, `nvfp4` and `k8v4` KV types are rejected at
+`--spec dflash`, the MoE architecture and the `fp8` and `k8v4` KV types are rejected at
 startup. `ninfer-perplexity` takes the same `--tp 2 --devices A,B` ([Perplexity](perplexity.md#two-gpus)).
 The split attention and Gated DeltaNet projections take FP8 or NVFP4 weights and the split MLP
 FP8 or NVFP4, so both the official mixed artifact (FP8 attention and GDN, NVFP4 MLP) and an

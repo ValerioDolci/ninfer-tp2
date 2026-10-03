@@ -7,7 +7,10 @@
 >
 > - **Covered:** ordinary decoding, `--spec mtp`, `--spec dflash2 --lm-head-draft`, prefix
 >   reuse, concurrent requests, CUDA Graph decode and `--vision`, with `bf16`, `int8` or `nvfp4` KV. See
->   [Two GPUs](docs/cli.md#two-gpus) and [serving](docs/serving.md).
+>   [Two GPUs](docs/cli.md#two-gpus) and [serving](docs/serving.md). `nvfp4` KV at `--tp 2` (v0.4.2,
+>   contributed by @glfenix) is an option, not the default: on two RTX 5070 Ti it frees about 2 GiB per
+>   board at a 262k context with perplexity and GSM8K unchanged, but costs +4…8 % per decode round
+>   with MTP3 and +4…17 % with DFlash2 between 55k and 210k prompt tokens; keep `int8` where it fits.
 > - **Verified on:** two RTX 5070 Ti 16 GB without peer access, Linux, CUDA 13.1, core clocks
 >   capped at about 2.1 GHz. Other GPUs and P2P-capable pairs are untested.
 > - **Measured** with upstream's own benchmark suite against the published RTX 5090 runs, same
