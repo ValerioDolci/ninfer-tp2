@@ -336,8 +336,11 @@ tokens. Keep `int8` where it fits; `nvfp4` buys KV capacity (`--kv-capacity` abo
 for concurrent requests) or room for a larger artifact. `--max-context` cannot exceed the artifact's
 position capacity with either cache. The MTP head is split like a Text layer and verification
 runs on both ranks; `--draft-tokens` and `--lm-head-draft` work as on one GPU. The DFlash2 drafter
-runs on rank 0 alone and requires `--lm-head-draft`, since the full output head is split by
-vocabulary across the ranks; a drafter with full-attention layers is not supported.
+is split like the Text layers since v0.4.0 (each rank runs its half of the drafter's heads and MLP,
+with the recurrent state mirrored on both); its candidate selector sits on rank 1 (v0.4.1), or on
+rank 0 with `NINFER_TP_SELECTOR=primary` or when Vision is on rank 1. It requires `--lm-head-draft`,
+since the full output head is split by vocabulary across the ranks; a drafter with full-attention
+layers is not supported.
 `--spec dflash`, the MoE architecture and the `fp8` and `k8v4` KV types are rejected at
 startup. `ninfer-perplexity` takes the same `--tp 2 --devices A,B` ([Perplexity](perplexity.md#two-gpus)).
 The split attention and Gated DeltaNet projections take FP8 or NVFP4 weights and the split MLP
