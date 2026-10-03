@@ -25,9 +25,14 @@ void launch_exact(const Tensor& x, const Weight& weight, Tensor& residual, cudaS
     // 6 CTAs per SM (<= 80 registers instead of 96): on an RTX 5070 Ti [5120,8704] 47.1 -> 46.5 us
     // at T=4 and 57.1 -> 51.3 at T=5. T=3 keeps 1: there it cost +9 % (43.3 -> 47.1 us).
     constexpr int kMinBlocks = !kOutputFamily && ActiveTokens >= 4 ? 6 : 1;
+    // Four rows per warp for the MLP down family at T=3..5 (RTX 5070 Ti, ninfer_linear_bench on the
+    // plain linear() of [5120,8704]: T=3/4 46.8 -> 44.7 us, T=5 53.0 -> 46.8 us; the per-row K loop
+    // is unchanged, so outputs are bit-identical). Two rows elsewhere, as before. On the MTP3 decode
+    // round at tp 2 (rank 0 runs this fused half): 17.137 -> 17.017 ms (-0.7 %), 60/60 texts identical.
+    constexpr int kRowsPerWarp = !kOutputFamily && ActiveTokens >= 3 && ActiveTokens <= 5 ? 4 : 2;
     using Schedule = Nvfp4A16SimtSchedule<
         (ActiveTokens <= 16 && ActiveTokens >= (kOutputFamily ? 14 : 8)) ? 16 : 4, 1,
-        2, (ActiveTokens >= 17 && ActiveTokens <= 20) ? 8 : 16, ActiveTokens, 1,
+        kRowsPerWarp, (ActiveTokens >= 17 && ActiveTokens <= 20) ? 8 : 16, ActiveTokens, 1,
         Nvfp4SimtActivationAccess::TokenPacked, Nvfp4ScaleAccess::Direct, Nvfp4CodeCache::Default,
         1, Nvfp4SimtBlockOrder::RowsContiguous, kMinBlocks>;
     launch_nvfp4_a16_simt<

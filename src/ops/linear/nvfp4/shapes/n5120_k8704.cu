@@ -16,13 +16,16 @@ using Gemv =
 using C2      = Nvfp4A16SimtSchedule<4, 1, 2, 16, 2, 1, Nvfp4SimtActivationAccess::TokenPacked,
                                      Nvfp4ScaleAccess::Direct, Nvfp4CodeCache::Default, 1,
                                      Nvfp4SimtBlockOrder::RowsContiguous, 1>;
-// C4 (T=3..4) and C5 ask for 6 CTAs per SM (<= 80 registers instead of 112); rows stay one per
-// warp, so only speed changes. On an RTX 5070 Ti [5120,8704] T=3/4/5: 50.1/50.4/53.3 ->
-// 44.7/44.8/49.0 us; [5120,17408]: 94.2/94.7/99.3 -> 85.5/85.9/97.0 us.
-using C4      = Nvfp4A16SimtSchedule<4, 1, 2, 16, 4, 1, Nvfp4SimtActivationAccess::TokenPacked,
+// C4 (T=3..4) and C5 ask for 6 CTAs per SM (<= 80 registers instead of 112). Four rows per warp
+// (16 per CTA, 320 CTAs) instead of two: each warp amortizes its activation reads over twice the
+// weight rows, and the per-row K loop is unchanged, so outputs stay bit-identical. Measured with
+// ninfer_linear_bench on an RTX 5070 Ti (70 SMs), medians of 3x60: T=3/4 46.8 -> 44.7 us
+// (-4.5 %), T=5 53.0 -> 46.8 us (-11.6 %). Two rows per warp was the previous choice (and the
+// parent's); one row per warp costs +30 %, eight rows spill registers (+120 %).
+using C4      = Nvfp4A16SimtSchedule<4, 1, 4, 16, 4, 1, Nvfp4SimtActivationAccess::TokenPacked,
                                      Nvfp4ScaleAccess::Direct, Nvfp4CodeCache::Default, 1,
                                      Nvfp4SimtBlockOrder::RowsContiguous, 6>;
-using C5      = Nvfp4A16SimtSchedule<4, 1, 2, 16, 5, 1, Nvfp4SimtActivationAccess::TokenPacked,
+using C5      = Nvfp4A16SimtSchedule<4, 1, 4, 16, 5, 1, Nvfp4SimtActivationAccess::TokenPacked,
                                      Nvfp4ScaleAccess::Direct, Nvfp4CodeCache::Default, 1,
                                      Nvfp4SimtBlockOrder::RowsContiguous, 6>;
 using T32R64  = Nvfp4A4MmaSchedule<32, 64, 256, 2, 4, 2, 2>;
@@ -36,7 +39,9 @@ Nvfp4Launch select_a16(int tokens) {
     if (tokens <= 2) return nvfp4_linear_a16_simt<Geometry, 2, C2, true>;
     if (tokens <= 4) return nvfp4_linear_a16_simt<Geometry, 4, C4, false>;
     if (tokens == 5) return nvfp4_linear_a16_simt<Geometry, 5, C5, true>;
-    if (tokens <= 8) return nvfp4_linear_a16_sliced_k<Geometry, Nvfp4SlicedInstance<8, 4, 2>>;
+    // Eight K-warps (256 threads) instead of four at T=6..8: 53.0 -> 50.9 us (-3.9 %) on the
+    // RTX 5070 Ti; the K partition changes, so T=6..8 outputs are not bit-identical to the parent.
+    if (tokens <= 8) return nvfp4_linear_a16_sliced_k<Geometry, Nvfp4SlicedInstance<8, 8, 2>>;
     if (tokens <= 16) return nvfp4_linear_a16_sliced_k<Geometry, Nvfp4SlicedInstance<16, 4, 2>>;
     if (tokens <= 24) return nvfp4_linear_a16_sliced_k<Geometry, Nvfp4SlicedInstance<32, 4, 2>>;
     if (tokens <= 32) return nvfp4_linear_a16_sliced_k<Geometry, Nvfp4SlicedInstance<32, 4, 1>>;
