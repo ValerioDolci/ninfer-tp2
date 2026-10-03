@@ -84,8 +84,8 @@ constexpr Geometry kGeometries[] = {
     {"d256-h16-kv2", 16, 2},
 };
 
-// One device's half of d256-h24-kv4 under two-device tensor parallelism. Only the BF16 and INT8
-// caches register it.
+// One device's half of d256-h24-kv4 under two-device tensor parallelism. Only the BF16, INT8 and
+// NVFP4 caches register it.
 constexpr Geometry kTensorParallelGeometry{"d256-h12-kv2", 12, 2};
 
 ops::AttentionHeadGeometry op_geometry(const Geometry& geometry) {
@@ -2606,7 +2606,8 @@ int run_small_prefill_cases(KvCacheStorage storage) {
 int run_tensor_parallel_geometry_cases(KvCacheStorage storage) {
     const Geometry& geometry = kTensorParallelGeometry;
     int failures             = 0;
-    if (storage != KvCacheStorage::BFloat16 && storage != KvCacheStorage::Int8Group64) {
+    if (storage != KvCacheStorage::BFloat16 && storage != KvCacheStorage::Int8Group64 &&
+        storage != KvCacheStorage::Nvfp4Group16) {
         try {
             (void)ops::causal_softmax_attention_workspace_capacity_bytes(op_geometry(geometry),
                                                                          storage, {1, 64}, 1, 1, 1);

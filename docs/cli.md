@@ -328,7 +328,7 @@ keeps them on the staged copies. [`tools/tp2/mailbox_probe.cu`](../tools/README.
 checks the mailbox on a machine without loading a model.
 
 Tensor parallelism covers ordinary decoding, `--spec mtp` and `--spec dflash2` of the dense
-architecture with `bf16` or `int8` KV. The MTP head is split like a Text layer and verification
+architecture with `bf16`, `int8` or `nvfp4` KV. The MTP head is split like a Text layer and verification
 runs on both ranks; `--draft-tokens` and `--lm-head-draft` work as on one GPU. The DFlash2 drafter
 runs on rank 0 alone and requires `--lm-head-draft`, since the full output head is split by
 vocabulary across the ranks; a drafter with full-attention layers is not supported.

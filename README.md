@@ -6,7 +6,7 @@
 > Wael Mansour, natpate, ivanov84 and parallelno; see [NOTICE](NOTICE) for attribution.
 >
 > - **Covered:** ordinary decoding, `--spec mtp`, `--spec dflash2 --lm-head-draft`, prefix
->   reuse, concurrent requests, CUDA Graph decode and `--vision`, with `bf16` or `int8` KV. See
+>   reuse, concurrent requests, CUDA Graph decode and `--vision`, with `bf16`, `int8` or `nvfp4` KV. See
 >   [Two GPUs](docs/cli.md#two-gpus) and [serving](docs/serving.md).
 > - **Verified on:** two RTX 5070 Ti 16 GB without peer access, Linux, CUDA 13.1, core clocks
 >   capped at about 2.1 GHz. Other GPUs and P2P-capable pairs are untested.

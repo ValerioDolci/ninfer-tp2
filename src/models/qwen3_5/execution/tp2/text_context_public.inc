@@ -8,7 +8,7 @@
 // MTP decode-round forwards and proposals, the MTP bridge and their logits run split through the
 // rank-array overloads below; the single-rank MTP and verification entries are rejected with
 // std::invalid_argument. The constructor rejects the MoE FFN, paired
-// input projections, KV caches the head-local attention does not support (only BF16 and INT8-G64)
+// input projections, KV caches the head-local attention does not support (only BF16, INT8-G64 and NVFP4-G16)
 // and incomplete MTP bindings.
 
 public:

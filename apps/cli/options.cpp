@@ -111,7 +111,7 @@ std::string usage_text(const char* argv0) {
            "tokens: larger media are resized and the encode workspace is planned for N.\n"
            "--tp 2 --devices A,B splits the dense model across two GPUs (rank 0 on A);\n"
            "tensor parallelism supports ordinary, --spec mtp and --spec dflash2 --lm-head-draft "
-           "decoding, with or without --vision, with bf16 or int8 KV only.\n"
+           "decoding, with or without --vision, with bf16, int8 or nvfp4 KV only.\n"
            "--no-tp-mailbox keeps the captured --tp 2 all-reduces on cross-device copies.\n"
            "--thinking-budget caps model-origin thinking tokens; inserted control tokens count "
            "toward --max-new.\n"

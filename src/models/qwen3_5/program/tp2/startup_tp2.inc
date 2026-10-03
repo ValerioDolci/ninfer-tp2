@@ -457,9 +457,10 @@ void validate_tensor_parallel_options(const execution::Parameters& parameters,
                 "tensor-parallel DFlash2 supports only drafters without full-attention layers");
         }
         if (options.kv_cache != KvCacheStorage::BFloat16 &&
-            options.kv_cache != KvCacheStorage::Int8Group64) {
+            options.kv_cache != KvCacheStorage::Int8Group64 &&
+            options.kv_cache != KvCacheStorage::Nvfp4Group16) {
             throw std::invalid_argument(
-                "tensor-parallel attention supports only bf16 and int8 KV caches");
+                "tensor-parallel attention supports only bf16, int8 and nvfp4 KV caches");
         }
         if (options.context_cache.host_state_slots != 0 ||
             options.context_cache.host_kv_capacity_bytes != 0) {

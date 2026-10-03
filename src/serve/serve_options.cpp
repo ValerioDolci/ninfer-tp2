@@ -119,7 +119,7 @@ std::string serve_usage_text(const char* argv0) {
            "shared=max(max-concurrency,4), anchors=2; Host state=8 slots, Host KV=8192 MiB\n"
            "       --tp 2 --devices A,B splits the dense model across two GPUs (rank 0 on A) for "
            "ordinary, --spec mtp or --spec dflash2 --lm-head-draft decoding, with or without "
-           "--vision, with bf16 or int8 KV; "
+           "--vision, with bf16, int8 or nvfp4 KV; "
            "it defaults device-state to "
            "max(2x concurrency,8), private to max(2x concurrency,8) and the Host tiers to 0\n"
            "       --no-tp-mailbox keeps the captured --tp 2 all-reduces on cross-device copies\n"
