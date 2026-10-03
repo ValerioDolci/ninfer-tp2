@@ -86,7 +86,8 @@
 >   oldest idle ones are evicted, and their next turn is prefilled again.
 > - **Speculative decoding.** DFlash2 needs `--lm-head-draft` and a drafter without
 >   full-attention layers (the published drafter has none). `--spec dflash` is not supported.
-> - **KV cache types.** `bf16` and `int8` only; `fp8`, `nvfp4` and `k8v4` are rejected.
+> - **KV cache types.** `bf16`, `int8` and (since v0.4.2) `nvfp4`; `fp8` and `k8v4` are rejected. `int8` is the
+>   default choice on 16 GB boards, see [Two GPUs](docs/cli.md#two-gpus) for the measured `nvfp4` trade-off.
 > - **Where it pays off.** The gain grows with context: prompt processing is 1.5-2.1x and decode
 >   1.1x at short context to 1.65x at 184K (1.75x with uncapped clocks) against llama.cpp on the same two boards. On short
 >   prose prompts llama.cpp with MTP was about 8% faster. With v0.2.3, uncapped and with `--lm-head-draft`

@@ -954,7 +954,7 @@ target features.
 Tensor parallelism covers ordinary decoding, `--spec mtp` and `--spec dflash2 --lm-head-draft`,
 each with or without `--vision`, with `bf16`, `int8` or `nvfp4` KV. `--spec dflash`, `--spec dflash2` without
 `--lm-head-draft` or with a drafter that has full-attention layers, the MoE architecture and the
-`fp8`, `nvfp4` and `k8v4` KV types are rejected at startup, and so is a `--vision-device` outside
+`fp8` and `k8v4` KV types are rejected at startup (`nvfp4` is accepted since v0.4.2, see [Two GPUs](cli.md#two-gpus)), and so is a `--vision-device` outside
 `--devices`.
 
 Serve writes human-readable operational records to stderr using
