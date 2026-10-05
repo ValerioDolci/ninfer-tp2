@@ -66,9 +66,17 @@ std::size_t dflash_proposal_workspace_split(const SequencePlanImpl& plan, std::i
         {
             auto mlp = layout.scope();
             prepare();
-            reserve_matrix(layout, DType::BF16, block.mlp.gate_up.weight.n, columns);
-            reserve_linear(layout, block.mlp.gate_up, columns, columns);
-            reserve_matrix(layout, DType::BF16, block.mlp.gate_up.weight.n / 2, columns);
+            const auto& gate_up = block.mlp.gate_up;
+            if (execution::dflash2_split_mlp_fused(gate_up)) {
+                reserve_matrix(layout, DType::BF16, gate_up.weight.n / 2, columns);
+                reserve_scratch(layout, ops::linear_swiglu_workspace_capacity_bytes(
+                                            gate_up.weight.qtype, gate_up.weight.n,
+                                            gate_up.weight.k, gate_up.policy, columns, columns));
+            } else {
+                reserve_matrix(layout, DType::BF16, gate_up.weight.n, columns);
+                reserve_linear(layout, gate_up, columns, columns);
+                reserve_matrix(layout, DType::BF16, gate_up.weight.n / 2, columns);
+            }
             reserve_matrix(layout, DType::BF16, hidden, columns);
             reserve_linear(layout, block.mlp.down, columns, columns);
         }

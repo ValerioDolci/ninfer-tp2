@@ -21,6 +21,8 @@ from .methods import (
     grouped_absmax,
     fp8_row_maxabs,
     import_encoded,
+    nvfp4_absmax,
+    nvfp4_mse,
 )
 from .model import Model
 from .sources.logical import LogicalSource, select_rows
@@ -379,7 +381,14 @@ class Recipe:
                 )
             emit([(name, self.selections[name][0]) for name in names], chosen)
             used.update(names)
-        standard = (cast_direct, grouped_absmax, fp8_row_maxabs, import_encoded)
+        standard = (
+            cast_direct,
+            grouped_absmax,
+            fp8_row_maxabs,
+            import_encoded,
+            nvfp4_absmax,
+            nvfp4_mse,
+        )
         for names in self.model.packing_groups:
             if any(
                 name in used or name in self.aliases or name in self.separate_parameters

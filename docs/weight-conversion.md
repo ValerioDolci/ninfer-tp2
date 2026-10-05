@@ -154,10 +154,15 @@ The converter currently writes these formats:
 | `bf16`, `fp32`, `int32` | `cast_direct` | Direct words through the source reader |
 | `q4_g64_fp16`, `q5_g64_fp16`, `q6_g64_fp16`, `q8_g32_fp16` | `grouped_absmax` | Supply a custom method/source if needed |
 | `fp8_e4m3fn_row_bf16` | `fp8_row_maxabs` | `import_encoded` |
-| `nvfp4` | Supply a custom quantizer | `import_encoded` |
+| `nvfp4` | `nvfp4_absmax`, `nvfp4_mse` | `import_encoded` |
 
 `grouped_absmax` stores one FP16 scale per group and signed integer codes. `fp8_row_maxabs` first
 rounds input values to BF16, then produces E4M3FN codes and one BF16 multiplier per row.
+`nvfp4_absmax` maps each 16-value group's largest magnitude to the largest E2M1 code (6) through
+an E4M3FN group scale, with one FP32 divisor for the whole parent; `nvfp4_mse` keeps, per group,
+whichever of the targets 6, 5.5, 5, 4.5 and 4 gives the least squared error. Both round codes to
+nearest with ties to even. They quantize weights only: an `AllowA4` use still needs its activation
+divisor supplied through `recipe.use`, so for an uncalibrated parent use `A16Only`.
 `import_encoded` preserves compatible code and scale words, including NVFP4's matrix weight divisor.
 It does not dequantize and requantize them.
 

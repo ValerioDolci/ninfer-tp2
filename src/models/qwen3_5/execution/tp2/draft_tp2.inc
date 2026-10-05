@@ -151,11 +151,19 @@ void propose_dflash2_batch_tp2(DFlashBatchContext& state, int batch, int k,
                                        config.rms_norm_eps, *p.mlp_conv, branch[r]);
                 const std::int32_t gate_up = p.mlp.gate_up.weight.n;
                 const std::int32_t half    = gate_up / 2;
-                Tensor gu = work.alloc(DType::BF16, {gate_up, columns});
-                project(branch[r].prepared.view({hidden, columns}), p.mlp.gate_up, gu, work,
-                        stream);
-                Tensor activation = work.alloc(DType::BF16, {half, columns});
-                ops::silu_mul(gu.slice(0, 0, half), gu.slice(0, half, half), activation, stream);
+                Tensor activation;
+                if (dflash2_split_mlp_fused(p.mlp.gate_up)) {
+                    activation = work.alloc(DType::BF16, {half, columns});
+                    project_swiglu(branch[r].prepared.view({hidden, columns}), p.mlp.gate_up,
+                                   activation, work, stream);
+                } else {
+                    Tensor gu = work.alloc(DType::BF16, {gate_up, columns});
+                    project(branch[r].prepared.view({hidden, columns}), p.mlp.gate_up, gu, work,
+                            stream);
+                    activation = work.alloc(DType::BF16, {half, columns});
+                    ops::silu_mul(gu.slice(0, 0, half), gu.slice(0, half, half), activation,
+                                  stream);
+                }
                 partial[r]       = work.alloc(DType::BF16, {hidden, width, batch});
                 Tensor projected = partial[r].view({hidden, columns});
                 project(activation, p.mlp.down, projected, work, stream);

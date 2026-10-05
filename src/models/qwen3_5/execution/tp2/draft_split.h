@@ -41,6 +41,14 @@ struct DFlashPeerDrafter {
 void dflash2_draft_round_tp2(DFlashBatchContext& state, std::int32_t batch_size, std::uint32_t k,
                              DFlashEnvelopes envelopes);
 
+// Whether a split drafter layer's MLP gate/up runs the fused SwiGLU projection: an NVFP4 gate/up
+// (A16Only, tools/convert/official_recipes.py _dflash2_nvfp4_gate_up) has a fused A16 route at every
+// width, while Q8 keeps the linear projection followed by silu_mul (the drafts of artifacts with a
+// Q8 drafter stay what they were).
+[[nodiscard]] inline bool dflash2_split_mlp_fused(const LinearParameters& gate_up) {
+    return gate_up.weight.qtype == QType::NVFP4;
+}
+
 // The rank that holds the split drafter's candidate selector (load/sharding.cpp), read from rank 0's
 // Parameters: 0 when they hold it, else 1.
 [[nodiscard]] std::size_t dflash2_selector_rank(const Parameters& rank0);

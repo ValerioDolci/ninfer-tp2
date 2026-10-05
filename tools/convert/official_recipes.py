@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from .methods import cast_direct, fp8_row_maxabs, grouped_absmax, import_encoded
+from .methods import cast_direct, fp8_row_maxabs, grouped_absmax, import_encoded, nvfp4_mse
 
 Q4 = "q4_g64_fp16"
 Q5 = "q5_g64_fp16"
@@ -52,6 +52,20 @@ def _optional(model, recipe):
             prefix = f"{backend}/layers/{layer}/attention/"
             for role in ("key", "value"):
                 recipe.share(prefix + "context_" + role, prefix + role)
+
+
+def _dflash2_nvfp4_gate_up(model, recipe):
+    """Store each DFlash2 layer's MLP gate/up parent as NVFP4 with 16-bit activations."""
+    if "dflash2" not in model.components:
+        return
+    layers = model.components["dflash2"]["config"]["num_hidden_layers"]
+    for layer in range(layers):
+        recipe.assign(
+            [f"dflash2/layers/{layer}/mlp/gate", f"dflash2/layers/{layer}/mlp/up"],
+            format="nvfp4",
+            method=nvfp4_mse,
+            activation_policy="A16Only",
+        )
 
 
 def _dense_groupwise(model, recipe, vocabulary):

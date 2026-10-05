@@ -6,6 +6,7 @@
 #include "ops/common/warp.cuh"
 #include "ops/linear/nvfp4/nvfp4_schedule.cuh"
 #include "ops/linear/nvfp4/nvfp4_template_launch.cuh"
+#include "ops/linear/nvfp4/nvfp4_instances.cuh"
 #include "ops/linear_swiglu/nvfp4/nvfp4_linear_swiglu_epilogue.cuh"
 
 #include <cuda_bf16.h>
@@ -66,6 +67,19 @@ void launch_sliced_k(const Tensor& x, const Weight& weight, Tensor& out, cudaStr
         Nvfp4SwiGluEpilogue{}, stream, Nvfp4SwiGluRows<8>{});
 }
 
+// Above 16 tokens A16 has no measured 5070 Ti schedule; these are the upstream-shaped routes of
+// Wallawalla47/ninfer-custom 1f2f5e97, which serve the DFlash2 drafter's NVFP4 gate/up (A16Only)
+// at batched widths: one sliced-K tile through 32 tokens, then 64-token Tensor Core tiles whose
+// m16 fragments pair 8 gate rows over their 8 up rows (Nvfp4SwiGluMmaRows). The target's gate/up
+// is AllowA4 and never reaches them.
+void launch_a16_mma(const Tensor& x, const Weight& weight, Tensor& out, cudaStream_t stream) {
+    launch_nvfp4_a16_mma<
+        Nvfp4ScheduleInstance<Nvfp4A16MmaSchedule<32, 64, 128, 16, 16, 1, 3>, 5120>>(
+        nvfp4_a16_operands(x, weight),
+        LinearBf16Output{static_cast<__nv_bfloat16*>(out.data), weight.n / 2},
+        Nvfp4SwiGluEpilogue{}, stream, Nvfp4SwiGluMmaRows{});
+}
+
 } // namespace
 
 void nvfp4_linear_swiglu_small_t_launch(const Tensor& x, const Weight& weight, Tensor& out,
@@ -76,8 +90,12 @@ void nvfp4_linear_swiglu_small_t_launch(const Tensor& x, const Weight& weight, T
         launch_sliced_k<SlicedK<8, 4, 1, 4>, 4>(x, weight, out, stream);
     else if (x.ne[1] <= 8)
         launch_sliced_k<SlicedK<8, 2, 2, 8>>(x, weight, out, stream);
-    else
+    else if (x.ne[1] <= 16)
         launch_sliced_k<SlicedK<16, 1, 2, 16>>(x, weight, out, stream);
+    else if (x.ne[1] <= 32)
+        launch_sliced_k<Nvfp4SlicedInstance<32, 4, 2>>(x, weight, out, stream);
+    else
+        launch_a16_mma(x, weight, out, stream);
 }
 
 } // namespace ninfer::ops::detail
