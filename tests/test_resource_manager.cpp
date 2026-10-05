@@ -1111,6 +1111,13 @@ public:
         return result;
     }
 
+    // Terminal settlement of a cancelled request: same result contract as finish, same failure
+    // switch, so the ResourceManager's discard fallback is exercised the same way.
+    [[nodiscard]] FakeFinishResult finish_cancelled(FakeSequenceHandle sequence) noexcept {
+        ++finish_cancelled_calls;
+        return finish(sequence);
+    }
+
     [[nodiscard]] FakeAbortResult abort(FakeSequenceHandle) noexcept {
         ++abort_calls;
         advance_revision();
@@ -1172,6 +1179,7 @@ public:
     std::uint64_t pressure_target_assessments = 0;
     std::uint64_t start_calls                 = 0;
     std::uint64_t finish_calls                = 0;
+    std::uint64_t finish_cancelled_calls      = 0;
     std::uint64_t abort_calls                 = 0;
     std::uint64_t skipped_captures            = 0;
     std::size_t pressure_target_count_peak    = 0;
@@ -2415,6 +2423,45 @@ void test_root_lifecycle_and_prefix_reuse() {
             "failed start did not roll back its logical source claim");
 }
 
+// A cancelled request settles like a finished turn: the sequence it holds (a consumed same-session
+// source included) is catalogued at its frontier and stays reusable; the discard is the fallback.
+void test_cancelled_request_is_catalogued() {
+    FakeManager manager = make_manager(1, 2);
+    FakeProgram program;
+    const ActiveRequest first = start_active(manager, program, 7, make_base(7), 1);
+    (void)finish_active(manager, program, first);
+    const ActiveRequest follow = start_active(manager, program, 7, make_base(7), 2);
+    require(program.started_source_mode == PrivateSourceMode::ConsumeToActive,
+            "same-session follow-up did not consume its source");
+    require(manager.lane_state(follow.lane) == ninfer::runtime::LogicalLaneState::Active,
+            "follow-up lane is not Active before its cancellation");
+
+    program.finish_frontier       = 24;
+    const FakeFinishResult result = manager.finish(program, follow.lane, follow.sequence, true);
+    require(result.status == ConsumeStatus::Consumed &&
+                result.disposition == FinishDisposition::Catalogued,
+            "cancelled request was not catalogued");
+    require(program.finish_cancelled_calls == 1 && program.abort_calls == 0,
+            "cancellation did not settle through finish_cancelled");
+    require(manager.lane_state(follow.lane) == ninfer::runtime::LogicalLaneState::Free,
+            "cancelled lane did not return to Free");
+    auto reuse = manager.inspect(program, FakePreparedPrompt{7}, make_base(7), 3);
+    require(reuse.readiness == Readiness::Ready && reuse.choice &&
+                reuse.choice->summary().reusable_prompt_tokens == 24,
+            "catalogued cancelled sequence was not reusable at its frontier");
+
+    const ActiveRequest third = start_active(manager, program, 7, make_base(7), 4);
+    program.finish_fail_next  = true;
+    const FakeFinishResult discarded =
+        manager.finish(program, third.lane, third.sequence, true);
+    require(discarded.status == ConsumeStatus::Consumed &&
+                discarded.disposition == FinishDisposition::Released &&
+                program.finish_cancelled_calls == 2 && program.abort_calls == 1,
+            "unretainable cancelled sequence did not fall back to the discard");
+    require(manager.lane_state(third.lane) == ninfer::runtime::LogicalLaneState::Free,
+            "discarded cancelled lane did not return to Free");
+}
+
 void test_stale_revision_is_retryable() {
     FakeManager manager = make_manager();
     FakeProgram program;
@@ -3534,6 +3581,7 @@ int main() {
     run_test("dominating identity fast path",
              test_dominating_identity_does_not_build_pressure_graph);
     run_test("root lifecycle and prefix reuse", test_root_lifecycle_and_prefix_reuse);
+    run_test("cancelled request is catalogued", test_cancelled_request_is_catalogued);
     run_test("stale revision is retryable", test_stale_revision_is_retryable);
     run_test("materialization abort preserves source", test_materialization_abort_preserves_source);
     run_test("committed victim survives abort", test_committed_victim_survives_transaction_abort);
