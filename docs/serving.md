@@ -996,7 +996,7 @@ in append mode and flushes every event, so successive model or MTP blocks may sh
 file. The parent directory must already exist. Failure to open the file aborts startup; the log path
 is also rejected if it resolves to the model artifact.
 
-Every line is one `ninfer_serve_request_log` schema-v23 JSON object. All events carry
+Every line is one `ninfer_serve_request_log` schema-v24 JSON object. All events carry
 `timestamp_unix_ms` and a process-unique `server_instance_id`; request IDs are monotonic only within
 that server instance. Successful request-start records include request-scoped acquisition,
 media-preprocessing wall/work, tokenizer, cache hit/miss/single-flight, and payload-size fields;
@@ -1024,6 +1024,13 @@ clients send `<kind>/<tool>` labels: `gate/tp2` (`tools/tp2/gate_client.py`),
 `bench/serve-corpus`, `bench/serve-concurrency`, `bench/serve-ttft`, `bench/agentic-ab`,
 `smoke/serve-contract` and `smoke/thinking-preservation`. With `--cors` the header is listed in
 `Access-Control-Allow-Headers`.
+
+`request_done.result.model_thinking_tokens` counts the model-origin tokens accepted while thinking
+was open, including the token that closes it, for every response that starts in thinking, with or
+without a budget; it matches the usage `reasoning_tokens` / `thinking_tokens` except that inserted
+thinking control is not model-origin and raw output does not hide it. `thinking_budget`,
+`thinking_control_tokens`, and `thinking_control_applied` describe the optional cap. Before schema
+24 the count was recorded only under a thinking budget and was 0 otherwise.
 
 `request_done.result.tool_call_parse` records whether a complete marker was seen, the structured
 call count, empty non-string arguments omitted during normalization, schema-mismatched arguments

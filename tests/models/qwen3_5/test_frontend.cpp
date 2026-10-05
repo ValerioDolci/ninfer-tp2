@@ -1673,6 +1673,38 @@ int test_reasoning_split(const Frontend& frontend) {
                       "content channel did not strip the post-thinking separator");
     failures += check(session.reasoning_tokens() == 2,
                       "reasoning token usage did not count accepted reasoning tokens exactly");
+    const ninfer::ThinkingBudgetStats unlimited = session.thinking_stats();
+    failures += check(!unlimited.configured_budget && unlimited.model_thinking_tokens == 2 &&
+                          unlimited.injected_tokens == 0 && !unlimited.applied,
+                      "uncapped thinking did not count its model-origin thinking tokens");
+    const std::uint32_t canonical_thinking =
+        canonical_session.thinking_stats().model_thinking_tokens;
+    failures +=
+        check(canonical_thinking == canonical_session.reasoning_tokens() &&
+                  canonical_thinking > 0 && canonical_thinking < canonical_tokens.size(),
+              "uncapped thinking count disagrees with reasoning usage at a canonical close");
+
+    auto raw_session = frontend.make_output_session(prompt, {}, ninfer::OutputOptions{.raw = true});
+    (void)raw_session.preview_model(tokens, 2, ninfer::FinishReason::OutputLimit);
+    (void)raw_session.commit_preview();
+    failures += check(raw_session.reasoning_tokens() == 0 &&
+                          raw_session.thinking_stats().model_thinking_tokens == 2,
+                      "raw presentation hid the model-origin thinking count");
+
+    ninfer::ChatMessage direct_message;
+    direct_message.role = ninfer::ChatRole::User;
+    direct_message.parts.push_back(
+        ninfer::MessagePart{.kind = ninfer::MessagePartKind::Text, .text = "x", .media = {}});
+    ninfer::PromptInput direct_input;
+    direct_input.messages.push_back(std::move(direct_message));
+    direct_input.options.continuation    = ninfer::PromptContinuationMode::NewAssistantTurn;
+    direct_input.options.enable_thinking = false;
+    auto direct_prompt                   = frontend.prepare(std::move(direct_input));
+    auto direct_session                  = frontend.make_output_session(direct_prompt, {});
+    (void)direct_session.preview_model(tokens, 2, ninfer::FinishReason::OutputLimit);
+    (void)direct_session.commit_preview();
+    failures += check(direct_session.thinking_stats().model_thinking_tokens == 0,
+                      "a response without thinking counted thinking tokens");
     return failures;
 }
 

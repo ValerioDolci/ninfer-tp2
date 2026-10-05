@@ -344,10 +344,11 @@ public:
         state.in_reasoning        = split_reasoning;
         prefix_execution.tracking = starts_in_reasoning;
         semantic.budget           = thinking.budget;
-        // The presentation decoder already tracks normal reasoning output. Keep the independent
-        // semantic tracker dormant unless a cap needs it, so the default unlimited path does not
-        // decode every model token twice.
-        semantic.in_reasoning = starts_in_reasoning && thinking.budget.has_value();
+        // The semantic tracker counts model-origin thinking tokens whenever the response starts
+        // in thinking, capped or not: the count is reported per request, and it must not depend
+        // on the presentation decoder, which raw output disables. A budget additionally caps it.
+        // Its per-token work is one bounded scan for the close marker.
+        semantic.in_reasoning = starts_in_reasoning;
     }
 
     std::shared_ptr<const fi::Tokenizer> tokenizer;
