@@ -72,6 +72,7 @@ int main() {
     engine_options.speculative                                     = options.speculative;
     engine_options.enable_vision                                   = options.enable_vision;
     engine_options.use_cuda_graph                                  = options.use_cuda_graph;
+    engine_options.embedding_host                                  = true;
     engine_options.context_cache.device_state_slots                = 2;
     engine_options.context_cache.host_state_slots                  = 3;
     engine_options.context_cache.host_kv_capacity_bytes            = 64ULL << 20;
@@ -95,6 +96,7 @@ int main() {
     load.peak_staging_bytes   = 128;
     load.device_object_count  = 42;
     load.host_object_count    = 6;
+    load.host_mapped_bytes    = 1271895040;
     load.context_cost         = {
                 .transfer_source   = ninfer::ContextCostPresetSource::External,
                 .prefill_source    = ninfer::ContextCostPresetSource::CompiledDefault,
@@ -193,6 +195,9 @@ int main() {
     failures +=
         check(k8v4_server.at("engine").at("kv_cache") == "k8v4", "K8V4 KV report name missing");
     failures += check(server.at("engine").at("vision") == false, "Vision state missing");
+    failures += check(server.at("engine").at("embedding_host") == true &&
+                          server.at("artifact").at("host_mapped_bytes") == 1271895040,
+                      "embedding host state missing");
     failures += check(server.at("engine").at("speculative_backend") == "mtp",
                       "speculative backend missing");
     failures +=

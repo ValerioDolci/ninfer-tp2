@@ -85,7 +85,7 @@ std::string serve_usage_text(const char* argv0) {
            "[--kv-dtype bf16|int8|fp8|nvfp4|k8v4] [--spec mtp|dflash|dflash2 --draft-tokens N] "
            "[--default-max-tokens N] [--default-thinking-budget N] "
            "[--vision] [--vision-device N] [--max-vision-tokens N] [--no-cuda-graph] "
-           "[--no-tp-mailbox] [--no-prefix-reuse] "
+           "[--no-tp-mailbox] [--embedding-host] [--no-prefix-reuse] "
            "[--chat-template FILE] [--lm-head-draft] [--no-thinking] [--preserve-thinking] "
            "[--cors] "
            "[--temperature F] [--top-p F] [--top-k N] [--min-p F] [--presence-penalty F] "
@@ -123,6 +123,10 @@ std::string serve_usage_text(const char* argv0) {
            "it defaults device-state to "
            "max(2x concurrency,8), private to max(2x concurrency,8) and the Host tiers to 0\n"
            "       --no-tp-mailbox keeps the captured --tp 2 all-reduces on cross-device copies\n"
+           "       --embedding-host keeps the token embedding table in one copy in pinned host "
+           "memory that every GPU reads in place over PCIe, instead of one copy per GPU: frees "
+           "the table's VRAM (1.18 GiB per GPU on Qwen3.8-27B) for the KV pool, identical "
+           "results\n"
            "       --device-state-slots is extra checkpoint capacity beyond active lanes; "
            "--host-kv-mib uses MiB\n"
            "       --default-thinking-budget caps model-origin thinking for enabled requests; "
@@ -328,6 +332,8 @@ ServeOptions parse_serve_options(int argc, char** argv) {
             options.use_cuda_graph = false;
         } else if (arg == "--no-tp-mailbox") {
             options.tp_mailbox = false;
+        } else if (arg == "--embedding-host") {
+            options.embedding_host = true;
         } else if (arg == "--no-prefix-reuse") {
             options.allow_prefix_reuse = false;
         } else if (arg == "--lm-head-draft") {

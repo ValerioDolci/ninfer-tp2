@@ -799,6 +799,7 @@ The table lists executable defaults. The startup example selects a long-context 
 | `--max-vision-tokens N` | merged Vision tokens of one image or video item (`64..16384`); larger media are resized and the encode workspace is planned for `N` | `16384` |
 | `--no-cuda-graph` | disable CUDA Graph decode | graphs on |
 | `--no-tp-mailbox` | keep the captured `--tp 2` all-reduces on cross-device copies; see [Two GPUs](#two-gpus) | mailbox on without P2P |
+| `--embedding-host` | keep the token embedding table in one copy in pinned host memory that every GPU reads in place over PCIe, instead of one copy per GPU: frees its VRAM (1.18 GiB per GPU for Qwen3.8-27B) for the KV pool, identical results; see [Two GPUs](#two-gpus) | off |
 | `--no-prefix-reuse` | disable compatible-prefix caching | prefix reuse on |
 | `--device-state-slots N` | extra Device checkpoint StateImages beyond the active-lane guarantee | `max-concurrency`; `max(2 * max-concurrency, 8)` at `--tp 2` |
 | `--host-state-slots N` | pinned Host StateImage capacity | `8`; `0` at `--tp 2` |
@@ -951,6 +952,15 @@ resizes larger images and videos to that many tokens and shrinks the workspace a
 and DFlash2 compose with Vision as on one GPU: the MTP head and its prefix-reuse bridge read the
 visual columns on rank 0, where its token embedding lives, and the DFlash2 drafter reads rank 0's
 target features.
+
+`--embedding-host` moves the token embedding table out of both GPUs into one copy in mapped
+pinned host memory, read in place by the gathers of both ranks (prefill, decode, MTP and DFlash2,
+inside the CUDA Graphs too). The table is the same bytes, so outputs are identical; each GPU gets
+its size back (1.18 GiB for Qwen3.8-27B, whose table is FP8 with a scale per row) for the KV pool,
+and the server pins as much host RAM once. The rank lines of the startup log then show the table
+as `host-mapped` instead of `replicated`, followed by a `host-mapped weights` line. It also works on
+one GPU. A gather reads 5 KiB per token over PCIe: a few rows per decode round, 5 KiB per prompt
+token in prefill.
 
 Tensor parallelism covers ordinary decoding, `--spec mtp` and `--spec dflash2 --lm-head-draft`,
 each with or without `--vision`, with `bf16`, `int8` or `nvfp4` KV. `--spec dflash`, `--spec dflash2` without
