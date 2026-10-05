@@ -934,14 +934,22 @@ public:
         lanes_[lane.value] = LogicalLaneState::TerminalPending;
     }
 
-    [[nodiscard]] FinishResult finish(Program& program, LaneId lane, SequenceHandle sequence) {
+    // `cancelled`: terminal settlement of a cancelled request. The lane may still be Active; the
+    // Program catalogues the sequence at its committed frontier (Program::finish_cancelled) and
+    // the publication below is the same as for a finished turn. When the Program cannot retain
+    // the sequence the fallback is the plain discard of abort().
+    [[nodiscard]] FinishResult finish(Program& program, LaneId lane, SequenceHandle sequence,
+                                      bool cancelled = false) {
+        if (cancelled && lanes_.at(lane.value) == LogicalLaneState::Active) {
+            lanes_[lane.value] = LogicalLaneState::TerminalPending;
+        }
         require_lane(lane, LogicalLaneState::TerminalPending);
         if (!std::holds_alternative<std::monostate>(transaction_) ||
             program.has_context_transaction()) {
             throw std::logic_error("terminal finish overlaps an open resource transaction");
         }
         ActiveEntry& active = active_[lane.value];
-        FinishResult result = program.finish(sequence);
+        FinishResult result = cancelled ? program.finish_cancelled(sequence) : program.finish(sequence);
         if (result.status != ConsumeStatus::Consumed) {
             AbortResult discarded = program.abort(sequence);
             if (discarded.status != ConsumeStatus::Consumed) {

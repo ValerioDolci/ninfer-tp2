@@ -544,6 +544,8 @@ public:
                                       runtime::ExecutionTiming* failed_timing);
     [[nodiscard]] DiscardResult abort_pending(PendingBatch&& pending) noexcept;
     [[nodiscard]] FinishResult finish(SequenceHandle sequence) noexcept;
+    [[nodiscard]] FinishResult finish_cancelled(SequenceHandle sequence) noexcept;
+    [[nodiscard]] FinishResult finish_terminal(SequenceHandle sequence, bool cancelled) noexcept;
     [[nodiscard]] AbortResult abort(SequenceHandle sequence) noexcept;
     [[nodiscard]] ReleaseResult release_continuation(ContinuationHandle&& continuation) noexcept;
     [[nodiscard]] ReleaseResult release_shared_prefix(SharedPrefixHandle&& shared) noexcept;

@@ -952,6 +952,10 @@ public:
            runtime::ExecutionTiming* failed_timing = nullptr);
     [[nodiscard]] DiscardResult abort_pending(PendingBatch&& pending) noexcept;
     [[nodiscard]] FinishResult finish(SequenceHandle sequence) noexcept;
+    // Terminal settlement of a cancelled request. The sequence is catalogued at its committed
+    // frontier like a finished turn (same result contract as finish); the Engine falls back to
+    // abort when the Program cannot retain it.
+    [[nodiscard]] FinishResult finish_cancelled(SequenceHandle sequence) noexcept;
     [[nodiscard]] AbortResult abort(SequenceHandle sequence) noexcept;
     [[nodiscard]] ReleaseResult release_continuation(ContinuationHandle&& continuation) noexcept;
     [[nodiscard]] ReleaseResult release_shared_prefix(SharedPrefixHandle&& shared) noexcept;

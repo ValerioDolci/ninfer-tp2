@@ -452,6 +452,10 @@ DiscardResult Program::abort_pending(PendingBatch&& pending) noexcept {
 
 FinishResult Program::finish(SequenceHandle sequence) noexcept { return impl_->finish(sequence); }
 
+FinishResult Program::finish_cancelled(SequenceHandle sequence) noexcept {
+    return impl_->finish_cancelled(sequence);
+}
+
 AbortResult Program::abort(SequenceHandle sequence) noexcept { return impl_->abort(sequence); }
 
 ReleaseResult Program::release_continuation(ContinuationHandle&& continuation) noexcept {

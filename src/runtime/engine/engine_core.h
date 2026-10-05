@@ -985,9 +985,14 @@ private:
                 throw std::logic_error("active cancellation has no sequence binding");
             }
             (void)request->output.preview_terminal(FinishReason::Cancelled);
-            auto aborted = resources_.abort(*instance_.program, *request->lane, *request->sequence);
-            request->generation_timings = aborted.timings;
-            request->speculative_stats  = std::move(aborted.speculative);
+            // The cancelled sequence is catalogued, not discarded: a same-session follow-up has
+            // consumed the previous turn's continuation, and discarding it made the next turn
+            // rebuild the whole conversation (issue #3). ResourceManager falls back to the
+            // discard when the Program cannot retain the sequence.
+            auto settled = resources_.finish(*instance_.program, *request->lane,
+                                             *request->sequence, /*cancelled=*/true);
+            request->generation_timings = settled.timings;
+            request->speculative_stats  = std::move(settled.speculative);
             if (scheduler_.prefill_lane() == lane) { scheduler_.clear_prefill_lane(lane); }
             append_output(request, request->output.commit_preview());
             finish_engine_phase(boundary, EngineHostPhase::Boundary);

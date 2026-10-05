@@ -577,6 +577,21 @@ DiscardResult ProgramImpl::abort_pending(PendingBatch&& pending) noexcept {
 }
 
 FinishResult ProgramImpl::finish(SequenceHandle sequence) noexcept {
+    return finish_terminal(sequence, false);
+}
+
+// A cancelled request keeps the context it already holds. A same-session follow-up consumes its
+// source continuation when it materializes (the previous turn's checkpoint moves into the active
+// sequence), so discarding the cancelled sequence also discarded that checkpoint and the next turn
+// rebuilt the whole conversation (issue #3). Cataloguing the sequence at its committed frontier,
+// exactly like a finished turn, keeps the inherited checkpoints, the turn-closure rewrite captured
+// so far and the frontier itself: a different follow-up resumes from the closure, the same prompt
+// sent again resumes from the frontier.
+FinishResult ProgramImpl::finish_cancelled(SequenceHandle sequence) noexcept {
+    return finish_terminal(sequence, true);
+}
+
+FinishResult ProgramImpl::finish_terminal(SequenceHandle sequence, bool cancelled) noexcept {
     FinishResult out;
     if (has_context_transaction() || pending_transaction_ || !valid_sequence(sequence)) {
         return out;
@@ -585,7 +600,23 @@ FinishResult ProgramImpl::finish(SequenceHandle sequence) noexcept {
     RequestControl& request                = requests[lane];
     SequenceState& state                   = active_sequence(lane);
     const std::uint32_t continuation_index = active_continuations[lane];
-    if (request.lifecycle != Lifecycle::Finishable) { return out; }
+    if (cancelled) {
+        // Cancellation settles at a scheduler boundary: between prefill chunks (Prefilling),
+        // between rounds (Active) or at the model's own end (Finishable). A Pending step is
+        // never cancelled here; the frontier, the KV and the StateImage are those of the last
+        // commit, which is what finish publishes for a finished turn too.
+        if (request.lifecycle != Lifecycle::Prefilling && request.lifecycle != Lifecycle::Active &&
+            request.lifecycle != Lifecycle::Finishable) {
+            return out;
+        }
+        // Same reason as abort(): the lane's next request rewrites its pinned table shadow, and
+        // a cancelled prefill can still have table copies queued behind unsynchronized work.
+        try {
+            synchronize_devices();
+        } catch (...) {}
+    } else if (request.lifecycle != Lifecycle::Finishable) {
+        return out;
+    }
     if (!request.publish_continuation) {
         if (!clear_lane_strict(state, request)) { return out; }
         out.disposition = runtime::FinishDisposition::Released;
@@ -642,6 +673,7 @@ FinishResult ProgramImpl::finish(SequenceHandle sequence) noexcept {
     release_active_shared_references(state);
     release_sequence_growth_entitlement(state);
     unbind_sequence_kv(state);
+    request.prefill.reset();
     request.active_resources                    = {};
     request.optional_resources                  = {};
     request.lifecycle                           = Lifecycle::Empty;
