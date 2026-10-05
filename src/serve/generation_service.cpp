@@ -1,4 +1,5 @@
 #include "serve/generation_service.h"
+#include "serve/prompt_overlap.h"
 
 #include "product/media_acquire/acquire.h"
 #include "serve/translate.h"
@@ -316,22 +317,19 @@ PreparedRequest GenerationService::prepare(const GenerationRequest& request,
     if (options_.log_speculation_detail) {
         observation.accepted_length_steps = options_.speculation_detail_max_steps;
     }
-    PreparedRequest prepared = prepare_impl(
+    return prepare_impl(
         request, consumer_mode, observation, std::move(is_cancelled), std::move(context_cache),
         options_.allow_prefix_reuse ? CacheParticipation::ReadWrite : CacheParticipation::Disabled,
-        DeadlinePolicy::ClientPendingTimeout);
-    prepared.speculation_detail = options_.log_speculation_detail;
-    return prepared;
+        DeadlinePolicy::ClientPendingTimeout, options_.log_speculation_detail);
 }
 
-PreparedRequest GenerationService::prepare_impl(const GenerationRequest& request,
-                                                GenerationConsumerMode consumer_mode,
-                                                ninfer::GenerationObservationOptions observation,
-                                                std::function<bool()> is_cancelled,
-                                                ContextCacheHints context_cache,
-                                                CacheParticipation cache_participation,
-                                                DeadlinePolicy deadline_policy) const {
+PreparedRequest GenerationService::prepare_impl(
+    const GenerationRequest& request, GenerationConsumerMode consumer_mode,
+    ninfer::GenerationObservationOptions observation, std::function<bool()> is_cancelled,
+    ContextCacheHints context_cache, CacheParticipation cache_participation,
+    DeadlinePolicy deadline_policy, bool speculation_detail) const {
     PreparedRequest prepared;
+    prepared.speculation_detail             = speculation_detail;
     const ResolvedPromptSemantics semantics = resolve_prompt_semantics(request, options_);
     ninfer::RequestOptions request_options  = to_request_options(
         request, options_, semantics, cache_participation == CacheParticipation::ReadWrite);
@@ -383,6 +381,10 @@ PreparedRequest GenerationService::prepare_impl(const GenerationRequest& request
         prepared.preparation   = prompt.preparation_stats();
         prepared.prepare_seconds =
             std::chrono::duration<double>(Clock::now() - prepared.lifetime->started).count();
+        if (speculation_detail) {
+            const std::span<const ninfer::TokenId> prompt_ids = prompt.token_ids();
+            prepared.prompt_token_ids.assign(prompt_ids.begin(), prompt_ids.end());
+        }
         prepared.generation = engine_->submit(std::move(prompt), std::move(request_options),
                                               consumer_mode == GenerationConsumerMode::Streaming
                                                   ? ninfer::OutputConsumerMode::Streaming
@@ -484,6 +486,9 @@ GenerationOutcome GenerationService::run(PreparedRequest& prepared, const Stream
     if (prepared.speculation_detail) {
         outcome.metrics.speculative_accepted_lengths =
             std::move(result.speculative.accepted_lengths);
+        outcome.metrics.prompt_ngram_overlap =
+            prompt_ngram_overlap(prepared.prompt_token_ids, result.generated_token_ids);
+        prepared.prompt_token_ids = {};
     }
 
     outcome.tool_calls      = std::move(result.tool_calls);
@@ -504,7 +509,7 @@ void GenerationService::warmup() {
     request.max_tokens = 4;
     PreparedRequest prepared =
         prepare_impl(request, GenerationConsumerMode::Aggregate, {}, {}, {},
-                     CacheParticipation::Disabled, DeadlinePolicy::UnboundedStartup);
+                     CacheParticipation::Disabled, DeadlinePolicy::UnboundedStartup, false);
     run(prepared, nullptr);
 }
 

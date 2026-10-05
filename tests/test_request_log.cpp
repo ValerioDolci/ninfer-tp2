@@ -1,14 +1,18 @@
 #include "serve/operational_log.h"
+#include "serve/prompt_overlap.h"
 #include "serve/request_log.h"
 
 #include <nlohmann/json.hpp>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <optional>
+#include <random>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -24,6 +28,68 @@ int check(bool condition, const char* message) {
     if (condition) { return 0; }
     std::cerr << message << '\n';
     return 1;
+}
+
+// Exact oracle: every output window against every prompt window, no hashing.
+std::optional<double> naive_overlap(const std::vector<ninfer::TokenId>& prompt,
+                                    const std::vector<ninfer::TokenId>& output) {
+    constexpr std::size_t n = kPromptOverlapNgram;
+    if (output.size() < n) { return std::nullopt; }
+    std::size_t matched = 0;
+    for (std::size_t i = 0; i + n <= output.size(); ++i) {
+        for (std::size_t j = 0; j + n <= prompt.size(); ++j) {
+            if (std::equal(output.begin() + i, output.begin() + i + n, prompt.begin() + j)) {
+                ++matched;
+                break;
+            }
+        }
+    }
+    return static_cast<double>(matched) / static_cast<double>(output.size() - n + 1);
+}
+
+int check_overlap(const std::vector<ninfer::TokenId>& prompt,
+                  const std::vector<ninfer::TokenId>& output, std::optional<double> expected,
+                  const char* message) {
+    const std::optional<double> actual = prompt_ngram_overlap(prompt, output);
+    return check(actual == expected && naive_overlap(prompt, output) == expected, message);
+}
+
+int overlap_tests() {
+    int failures = 0;
+    failures += check_overlap({1, 2, 3, 4, 5}, {1, 2, 3}, std::nullopt,
+                              "an output shorter than one n-gram must have no overlap");
+    failures += check_overlap({1, 2, 3}, {1, 2, 3, 4}, 0.0,
+                              "a prompt shorter than one n-gram must overlap nothing");
+    failures += check_overlap({7, 1, 2, 3, 4, 5, 6, 8}, {1, 2, 3, 4, 5, 6}, 1.0,
+                              "a verbatim copy of a prompt span must overlap entirely");
+    failures += check_overlap({1, 2, 3, 4, 5, 6}, {9, 1, 2, 3, 4, 5, 7}, 0.5,
+                              "two of four output windows occur in the prompt");
+    // Windows 1234 and 1234 match, 2341, 3412 and 4123 do not: repeats count per position.
+    failures += check_overlap({1, 2, 3, 4}, {1, 2, 3, 4, 1, 2, 3, 4}, 2.0 / 5.0,
+                              "a repeated output n-gram must count once per position");
+    failures += check_overlap({4, 3, 2, 1}, {1, 2, 3, 4}, 0.0,
+                              "n-grams are ordered token sequences, not token sets");
+
+    // Small alphabets give many partial and repeated matches; large ones with copied spans give
+    // long tables with few hits. Both must agree exactly with the oracle.
+    std::mt19937 random(20261005);
+    for (const int alphabet : {3, 8, 248320}) {
+        for (int trial = 0; trial < 8; ++trial) {
+            std::uniform_int_distribution<ninfer::TokenId> token(0, alphabet - 1);
+            std::vector<ninfer::TokenId> prompt(700), output(300);
+            for (ninfer::TokenId& id : prompt) { id = token(random); }
+            for (ninfer::TokenId& id : output) { id = token(random); }
+            for (std::size_t copy = 0; copy < 3; ++copy) {
+                const std::size_t from = random() % (prompt.size() - 40);
+                const std::size_t to   = random() % (output.size() - 40);
+                std::copy_n(prompt.begin() + static_cast<std::ptrdiff_t>(from), 40,
+                            output.begin() + static_cast<std::ptrdiff_t>(to));
+            }
+            failures += check(prompt_ngram_overlap(prompt, output) == naive_overlap(prompt, output),
+                              "n-gram overlap disagrees with the exact oracle");
+        }
+    }
+    return failures;
 }
 
 } // namespace
@@ -513,6 +579,15 @@ int main() {
                       .at("speculative")
                       .at("accepted_length_histogram") == Json::array(),
               "a request without speculation must record an empty histogram");
+    failures += check(done.at("result").at("prompt_ngram_overlap").is_null(),
+                      "prompt n-gram overlap must be null unless it was computed");
+    GenerationOutcome overlapping            = outcome;
+    overlapping.metrics.prompt_ngram_overlap = 0.375;
+    failures +=
+        check(Json::parse(format_request_done_json("serve-test", 3011, context, overlapping))
+                      .at("result")
+                      .at("prompt_ngram_overlap") == 0.375,
+              "prompt n-gram overlap missing from the done record");
     failures += check(done.at("speculative").at("accepted_lengths").is_null() &&
                           done.at("speculative").at("accepted_lengths_truncated").is_null(),
                       "per-step accepted lengths must be null unless they were recorded");
@@ -854,5 +929,6 @@ int main() {
     std::filesystem::remove(log_path);
 
     if (failures == 0) { std::cout << "ok\n"; }
+    failures += overlap_tests();
     return failures == 0 ? 0 : 1;
 }
