@@ -7,6 +7,7 @@
 #    include <sys/socket.h>
 #endif
 
+#include <algorithm>
 #include <stdexcept>
 #include <utility>
 
@@ -31,6 +32,25 @@ RequestJson parse_json_body(const httplib::Request& request) {
     try {
         return RequestJson::parse(request.body);
     } catch (const std::exception&) { bad_request("request body is not valid JSON"); }
+}
+
+std::optional<std::string> parse_client_label(const httplib::Request& request) {
+    const std::size_t count = request.get_header_value_count(kClientLabelHeader);
+    if (count == 0) { return std::nullopt; }
+    const auto allowed = [](char value) {
+        return (value >= 'a' && value <= 'z') || (value >= 'A' && value <= 'Z') ||
+               (value >= '0' && value <= '9') || value == '.' || value == '_' || value == ':' ||
+               value == '/' || value == '@' || value == '+' || value == '-';
+    };
+    std::string label = count == 1 ? request.get_header_value(kClientLabelHeader) : std::string();
+    if (label.empty() || label.size() > kClientLabelMaxLength ||
+        !std::all_of(label.begin(), label.end(), allowed)) {
+        bad_request(std::string(kClientLabelHeader) + " must be one value of 1 to " +
+                        std::to_string(kClientLabelMaxLength) +
+                        " characters from A-Z a-z 0-9 . _ : / @ + -",
+                    kClientLabelHeader, "invalid_client_label");
+    }
+    return label;
 }
 
 bool client_disconnected(const httplib::Request& request) { return request.is_connection_closed(); }

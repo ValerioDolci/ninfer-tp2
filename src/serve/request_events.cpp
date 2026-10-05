@@ -12,6 +12,7 @@ RequestLogContext make_request_log_context(std::uint64_t id, std::string protoco
     context.id                                 = id;
     context.protocol                           = std::move(protocol);
     context.model                              = metadata.model;
+    context.client                             = metadata.client;
     context.stream                             = metadata.stream;
     context.message_count                      = request.messages.size();
     context.media_item_count                   = request.media_item_count();
@@ -43,6 +44,7 @@ RequestRejectionLogContext make_request_rejection_log_context(std::uint64_t id,
     context.id                                 = id;
     context.protocol                           = std::move(protocol);
     context.model                              = metadata.model;
+    context.client                             = metadata.client;
     context.stream                             = metadata.stream;
     context.message_count                      = request.messages.size();
     context.media_item_count                   = request.media_item_count();

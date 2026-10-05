@@ -996,7 +996,7 @@ in append mode and flushes every event, so successive model or MTP blocks may sh
 file. The parent directory must already exist. Failure to open the file aborts startup; the log path
 is also rejected if it resolves to the model artifact.
 
-Every line is one `ninfer_serve_request_log` schema-v21 JSON object. All events carry
+Every line is one `ninfer_serve_request_log` schema-v22 JSON object. All events carry
 `timestamp_unix_ms` and a process-unique `server_instance_id`; request IDs are monotonic only within
 that server instance. Successful request-start records include request-scoped acquisition,
 media-preprocessing wall/work, tokenizer, cache hit/miss/single-flight, and payload-size fields;
@@ -1005,7 +1005,7 @@ they do not infer request behavior from process-global counter deltas.
 | Event | Contents |
 |---|---|
 | `server_start` | artifact path, architecture, public name, actual formats and prefill signature; resolved Engine and context-cache capacities, thinking/non-thinking sampler defaults plus process overrides, thinking-history and thinking-budget defaults, Device arenas, the optional non-additive Vision layout inside the unified workspace, Host State/KV capacity and occupancy, KV sizing ledger, CUDA Graph allowance, CUDA/GPU environment, and redacted argv |
-| `request_start` | protocol, resolved sampler and seed, requested reasoning effort, actual initial thinking mode and optional budget, Responses semantic-change flag, output budget, stream/message/tool shape |
+| `request_start` | protocol, caller label, resolved sampler and seed, requested reasoning effort, actual initial thinking mode and optional budget, Responses semantic-change flag, output budget, stream/message/tool shape |
 | `request_rejected` | parsed request shape, requested reasoning effort, media-item count, `phase: "prepare"`, and the exact HTTP status/type/code/parameter/message for a synchronous preparation rejection |
 | `request_done` | finish reason, prompt/completion/cache/computed-prefill tokens, prefix reuse path, tool-call parse diagnostics, request-owned materialization cost/search diagnostics, thinking-budget application counters, unrounded request-stage seconds, per-request Engine Host exposure, and complete speculative-decoding counters |
 | `request_error` | the resolved request configuration and the generation, cancellation, or pre-outcome transport terminal message |
@@ -1013,6 +1013,17 @@ they do not infer request behavior from process-global counter deltas.
 
 `requested_reasoning_effort` and `preserve_thinking` record the explicit options, or `null` when
 unspecified. `enable_thinking` records whether the response starts in thinking mode.
+
+`request.client` (in `request_start`, `request_rejected`, `request_done` and `request_error`) is the
+value of the optional NInfer request header `X-Ninfer-Client`, or `null` when the request did not
+carry it. It lets a measurement separate benchmark, smoke and gate traffic from ordinary clients
+sharing one log; the label never affects generation. The header carries one value of 1 to 64
+characters from `A-Z a-z 0-9 . _ : / @ + -`; a repeated or malformed header is rejected before
+preparation with HTTP 400 `invalid_client_label` (param `X-Ninfer-Client`). The repository's own
+clients send `<kind>/<tool>` labels: `gate/tp2` (`tools/tp2/gate_client.py`),
+`bench/serve-corpus`, `bench/serve-concurrency`, `bench/serve-ttft`, `bench/agentic-ab`,
+`smoke/serve-contract` and `smoke/thinking-preservation`. With `--cors` the header is listed in
+`Access-Control-Allow-Headers`.
 
 `request_done.result.tool_call_parse` records whether a complete marker was seen, the structured
 call count, empty non-string arguments omitted during normalization, schema-mismatched arguments

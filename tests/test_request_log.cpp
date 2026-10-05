@@ -283,6 +283,7 @@ int main() {
 
     const RequestLogMetadata metadata{
         .model                             = "qwen3.6-27b",
+        .client                            = "bench/serve-corpus",
         .stream                            = false,
         .output_tokens_explicit            = true,
         .preserve_thinking_semantic_change = true,
@@ -306,6 +307,15 @@ int main() {
     const Json started = Json::parse(format_request_start_json("serve-test", 2000, context));
     failures +=
         check(started.at("request").at("request_id") == 7, "request id missing from start record");
+    failures += check(started.at("request").at("client") == "bench/serve-corpus",
+                      "X-Ninfer-Client label missing from the start record");
+    RequestLogContext unlabeled = context;
+    unlabeled.client.reset();
+    failures += check(Json::parse(format_request_start_json("serve-test", 2001, unlabeled))
+                          .at("request")
+                          .at("client")
+                          .is_null(),
+                      "an unlabeled request must record a null client");
     failures += check(started.at("request").at("requested_output_tokens") == 4096,
                       "request output budget missing");
     failures += check(started.at("request").at("enable_thinking") == true,
@@ -342,6 +352,8 @@ int main() {
     failures +=
         check(rejected.at("event") == "request_rejected" && rejected.at("phase") == "prepare",
               "preparation rejection event or phase mismatch");
+    failures += check(rejected.at("request").at("client") == "bench/serve-corpus",
+                      "X-Ninfer-Client label missing from the rejection record");
     failures += check(rejected.at("request").at("request_id") == 8 &&
                           rejected.at("request").at("media_item_count") == 1 &&
                           rejected.at("request").at("message_count") == 2,
@@ -435,6 +447,8 @@ int main() {
                           done.at("materialization").at("search_renewals") == 1 &&
                           done.at("materialization").at("search_discovery_used") == true,
                       "materialization search quality or cumulative budget diagnostics missing");
+    failures += check(done.at("request").at("client") == "bench/serve-corpus",
+                      "X-Ninfer-Client label missing from the done record");
     failures +=
         check(done.at("result").at("finish_reason") == "output_limit", "finish reason missing");
     failures += check(done.at("result").at("prompt_tokens") == 401, "prompt tokens missing");
