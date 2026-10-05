@@ -996,7 +996,7 @@ in append mode and flushes every event, so successive model or MTP blocks may sh
 file. The parent directory must already exist. Failure to open the file aborts startup; the log path
 is also rejected if it resolves to the model artifact.
 
-Every line is one `ninfer_serve_request_log` schema-v22 JSON object. All events carry
+Every line is one `ninfer_serve_request_log` schema-v23 JSON object. All events carry
 `timestamp_unix_ms` and a process-unique `server_instance_id`; request IDs are monotonic only within
 that server instance. Successful request-start records include request-scoped acquisition,
 media-preprocessing wall/work, tokenizer, cache hit/miss/single-flight, and payload-size fields;
@@ -1033,8 +1033,15 @@ preserved for consumer validation, and a stable text-fallback reason. Fallback r
 
 `request_done.timings_seconds` contains `prepare`, `ttft`, `vision`, `prefill`, `decode`, and `total`
 as full-precision JSON numbers. Its `speculative` object contains `backend`, `draft_window`, `rounds`,
-`drafted_tokens`, `accepted_tokens`, `fallback_steps`, and `accepted_per_position`. Rates can be
-derived downstream from raw token counts and seconds instead of rounded stderr strings.
+`drafted_tokens`, `accepted_tokens`, `fallback_steps`, `accepted_per_position`, and
+`accepted_length_histogram`. A round is one verification of a nonempty draft; `fallback_steps` are
+decode steps without a draft. `accepted_per_position[i]` counts the rounds that accepted at least
+`i + 1` draft tokens (the cumulative form), and `accepted_length_histogram[i]` the rounds that accepted
+exactly `i`, for `i = 0..draft_window`; it sums to `rounds` and is computed from
+`accepted_per_position` and `rounds`, so the two never disagree. Both are empty without a
+speculative backend. A round whose draft was cut short by the remaining output budget counts at
+the length it actually accepted. Rates can be derived downstream from raw token counts and seconds
+instead of rounded stderr strings.
 
 For `server_start.memory`, `workspace.capacity_bytes` is the only physical workspace allocation.
 When Vision is enabled, `vision_workspace` reports the aggregate prompt and maximum-item token

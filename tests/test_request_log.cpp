@@ -488,6 +488,27 @@ int main() {
     failures +=
         check(done.at("speculative").at("accepted_per_position") == Json::array({290, 240, 190}),
               "speculative position counts missing");
+    failures += check(done.at("speculative").at("accepted_length_histogram") ==
+                          Json::array({10, 50, 50, 190}),
+                      "per-round accepted-length histogram is not the exact difference form");
+    GenerationOutcome plain_decode                = outcome;
+    plain_decode.metrics.speculative_backend      = ninfer::SpeculativeBackend::None;
+    plain_decode.metrics.speculative_draft_window = 0;
+    plain_decode.metrics.speculative_rounds       = 0;
+    plain_decode.metrics.speculative_accepted_per_position.clear();
+    failures +=
+        check(Json::parse(format_request_done_json("serve-test", 3004, context, plain_decode))
+                      .at("speculative")
+                      .at("accepted_length_histogram") == Json::array(),
+              "a request without speculation must record an empty histogram");
+    GenerationOutcome inconsistent                         = outcome;
+    inconsistent.metrics.speculative_accepted_per_position = {290, 295, 190};
+    failures +=
+        check(Json::parse(format_request_done_json("serve-test", 3005, context, inconsistent))
+                  .at("speculative")
+                  .at("accepted_length_histogram")
+                  .is_null(),
+              "inconsistent position counters must not produce a histogram");
     failures += check(done.at("materialization").at("predicted_total_ns") == 250000 &&
                           done.at("materialization").at("targets_evaluated") == 7 &&
                           done.at("materialization").at("stop_reason") == "queue_exhausted" &&
