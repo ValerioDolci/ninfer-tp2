@@ -313,10 +313,15 @@ PreparedRequest GenerationService::prepare(const GenerationRequest& request,
                                            ninfer::GenerationObservationOptions observation,
                                            std::function<bool()> is_cancelled,
                                            ContextCacheHints context_cache) const {
-    return prepare_impl(
+    if (options_.log_speculation_detail) {
+        observation.accepted_length_steps = options_.speculation_detail_max_steps;
+    }
+    PreparedRequest prepared = prepare_impl(
         request, consumer_mode, observation, std::move(is_cancelled), std::move(context_cache),
         options_.allow_prefix_reuse ? CacheParticipation::ReadWrite : CacheParticipation::Disabled,
         DeadlinePolicy::ClientPendingTimeout);
+    prepared.speculation_detail = options_.log_speculation_detail;
+    return prepared;
 }
 
 PreparedRequest GenerationService::prepare_impl(const GenerationRequest& request,
@@ -476,6 +481,10 @@ GenerationOutcome GenerationService::run(PreparedRequest& prepared, const Stream
     outcome.metrics.speculative_fallback_steps  = result.speculative.fallback_steps;
     outcome.metrics.speculative_accepted_per_position =
         std::move(result.speculative.accepted_per_position);
+    if (prepared.speculation_detail) {
+        outcome.metrics.speculative_accepted_lengths =
+            std::move(result.speculative.accepted_lengths);
+    }
 
     outcome.tool_calls      = std::move(result.tool_calls);
     outcome.tool_call_parse = result.tool_call_parse;

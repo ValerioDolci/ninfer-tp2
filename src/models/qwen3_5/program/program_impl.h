@@ -181,6 +181,7 @@ struct RequestBasePlanImpl {
     std::uint32_t root_rebuild_tail_begin = 0;
     qwen3_5::PreparedContextCache context_cache;
     ops::SamplingConfig sampling;
+    std::uint32_t accepted_length_steps       = 0;
     std::uint32_t text_kv_page_entitlement    = 0;
     std::uint32_t backend_kv_page_entitlement = 0;
     std::shared_ptr<const qwen3_5::VisionControlPlan> vision_control_plan;
@@ -245,6 +246,7 @@ struct AdmissionCandidateImpl : ResourceCandidateState {
     std::vector<CaptureGroup> capture_groups;
     std::vector<CaptureGroup> shared_candidates;
     ops::SamplingConfig sampling;
+    std::uint32_t accepted_length_steps       = 0;
     std::uint32_t text_kv_page_entitlement    = 0;
     std::uint32_t backend_kv_page_entitlement = 0;
     runtime::LaneId destination{};
@@ -404,6 +406,8 @@ struct RequestControl {
     ops::SamplingConfig sampling_host;
     GenerationTimings timings;
     SpeculativeStats speculative_stats;
+    // Bound of speculative_stats.accepted_lengths, reserved at install; 0 records nothing.
+    std::uint32_t accepted_length_steps = 0;
     detail::PhysicalResources active_resources;
     detail::PhysicalResources optional_resources;
     bool publish_continuation = true;
@@ -1143,7 +1147,8 @@ private:
     void release_sequence_state(SequenceState& sequence) noexcept;
     void prepare_graphs();
     void install_sampling(SequenceState& sequence, RequestControl& request,
-                          const ops::SamplingConfig& config);
+                          const ops::SamplingConfig& config, std::uint32_t accepted_length_steps,
+                          std::uint32_t output_tokens);
     void set_device_i32(Tensor& tensor, std::int32_t value);
     // Retains column `column` of the final-normed prefill chunk as `sequence`'s target tail
     // hidden. At tensor-parallel width 2 under MTP, rank 1 retains the same column of its own

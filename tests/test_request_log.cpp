@@ -157,6 +157,18 @@ int main() {
     failures += check(server.at("schema_version") == kRequestLogSchemaVersion,
                       "server record schema mismatch");
     failures += check(server.at("event") == "server_start", "server event mismatch");
+    failures += check(server.at("server").at("speculation_detail_max_steps").is_null(),
+                      "speculation detail is recorded as configured while disabled");
+    ServeOptions detail_options                 = options;
+    detail_options.log_speculation_detail       = true;
+    detail_options.speculation_detail_max_steps = 512;
+    failures +=
+        check(Json::parse(format_server_start_json(
+                              "serve-test", 1001, detail_options, engine_options, sampling_defaults,
+                              "deployment-alias", load, memory, environment, std::uint64_t{123456}))
+                      .at("server")
+                      .at("speculation_detail_max_steps") == 512,
+              "speculation detail cap missing from the server record");
     failures += check(server.at("server").at("public_model_id") == "deployment-alias",
                       "resolved public model id missing");
     failures += check(server.at("artifact").at("architecture") == "Qwen3_5ForCausalLM",
@@ -501,6 +513,55 @@ int main() {
                       .at("speculative")
                       .at("accepted_length_histogram") == Json::array(),
               "a request without speculation must record an empty histogram");
+    failures += check(done.at("speculative").at("accepted_lengths").is_null() &&
+                          done.at("speculative").at("accepted_lengths_truncated").is_null(),
+                      "per-step accepted lengths must be null unless they were recorded");
+    // Five steps of a 302-step request (300 rounds + 2 fallback steps) recorded: cut at the cap.
+    GenerationOutcome detailed = outcome;
+    detailed.metrics.speculative_accepted_lengths =
+        std::vector<std::uint8_t>{3, 0, ninfer::kSpeculativeFallbackStep, 2, 1};
+    const Json detailed_speculative =
+        Json::parse(format_request_done_json("serve-test", 3006, context, detailed))
+            .at("speculative");
+    failures += check(detailed_speculative.at("accepted_lengths") == "30-21" &&
+                          detailed_speculative.at("accepted_lengths_truncated") == true,
+                      "per-step accepted lengths are not one digit per step, cut at the cap");
+    GenerationOutcome complete                  = outcome;
+    complete.metrics.speculative_rounds         = 3;
+    complete.metrics.speculative_fallback_steps = 1;
+    complete.metrics.speculative_accepted_lengths =
+        std::vector<std::uint8_t>{ninfer::kSpeculativeFallbackStep, 3, 3, 0};
+    const Json complete_speculative =
+        Json::parse(format_request_done_json("serve-test", 3007, context, complete))
+            .at("speculative");
+    failures += check(complete_speculative.at("accepted_lengths") == "-330" &&
+                          complete_speculative.at("accepted_lengths_truncated") == false,
+                      "a complete per-step sequence is marked truncated");
+    GenerationOutcome wide_window                    = outcome;
+    wide_window.metrics.speculative_draft_window     = 15;
+    wide_window.metrics.speculative_accepted_lengths = std::vector<std::uint8_t>{15, 10, 9};
+    failures +=
+        check(Json::parse(format_request_done_json("serve-test", 3008, context, wide_window))
+                      .at("speculative")
+                      .at("accepted_lengths") == "fa9",
+              "accepted lengths above 9 are not hexadecimal digits");
+    GenerationOutcome beyond_window                    = outcome;
+    beyond_window.metrics.speculative_accepted_lengths = std::vector<std::uint8_t>{3, 4};
+    failures +=
+        check(Json::parse(format_request_done_json("serve-test", 3009, context, beyond_window))
+                  .at("speculative")
+                  .at("accepted_lengths")
+                  .is_null(),
+              "an accepted length beyond the draft window must not be serialized");
+    GenerationOutcome plain_detail                    = plain_decode;
+    plain_detail.metrics.speculative_fallback_steps   = 0;
+    plain_detail.metrics.speculative_accepted_lengths = std::vector<std::uint8_t>{};
+    const Json plain_detail_speculative =
+        Json::parse(format_request_done_json("serve-test", 3010, context, plain_detail))
+            .at("speculative");
+    failures += check(plain_detail_speculative.at("accepted_lengths") == "" &&
+                          plain_detail_speculative.at("accepted_lengths_truncated") == false,
+                      "a recorded request without speculation must have an empty sequence");
     GenerationOutcome inconsistent                         = outcome;
     inconsistent.metrics.speculative_accepted_per_position = {290, 295, 190};
     failures +=

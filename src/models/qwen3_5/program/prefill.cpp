@@ -671,7 +671,9 @@ void ProgramImpl::start_sequence(std::uint32_t lane, SequenceState& sequence,
             : speculative_backend == SpeculativeBackend::DFlash ? prompt_tokens
                                                                 : 0U;
         ensure_sequence_kv_mapped(sequence, prompt_tokens, backend_materialized);
-        install_sampling(sequence, request, request_plan.sampling);
+        install_sampling(sequence, request, request_plan.sampling,
+                         request_plan.accepted_length_steps,
+                         request_plan.summary.effective_output_tokens);
         sequence.rope_delta = staged.prompt.rope_delta;
         set_device_i32(io.rope_delta, sequence.rope_delta);
         // Rank 1's copy of the per-sequence control, as the KV rows are published on every rank;
