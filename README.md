@@ -56,6 +56,12 @@
 >   (`NINFER_TP_MAILBOX_DRAFT=copies` starts with the draft phase on the copies directly). With the
 >   copies everywhere MTP3 was reported at 49 tok/s. Reaching the server from Windows needs a
 >   `netsh interface portproxy` rule to the WSL2 address, which changes at every restart.
+>   On v0.4.2 the same setup is reported ([issue #4](https://github.com/ValerioDolci/ninfer-tp2/issues/4))
+>   with `--spec mtp --draft-tokens 3 --lm-head-draft` at 112-114 tok/s (MTP acceptance 97 %) and,
+>   with `--kv-dtype nvfp4`, the full 262,144 context on 16 GB boards with ~1 GiB free per board
+>   (int8 stopped at 204,800). The pipelined mailbox starts cleanly there (probe 0.83 ms); the
+>   first-launch step-down lands on the mailbox for the target forward and the copies for the
+>   MTP draft phase, as on Linux.
 >   [`tools/tp2/mailbox_probe.cu`](tools/README.md#standalone-tp2-mailbox-probe) tells in seconds,
 >   without a model, whether the mailbox works on a machine.
 > - **Tuning is per GPU.** The linear-op selectors (A16→A4 crossovers, MMA bands, TMA tiles and

@@ -138,6 +138,12 @@ StartResult ProgramImpl::start_request(MaterializationTransaction& transaction) 
         return StartResult{.sequence = handle};
     } catch (...) {
         if (destination && *destination < max_concurrency) {
+            // Startup may have queued work before a later publication check failed. Complete it
+            // before returning its buffers, pages or execution row to the pools (upstream
+            // 75a89050; here on both devices).
+            try {
+                synchronize_devices();
+            } catch (...) {}
             const std::uint32_t lane = *destination;
             if (active_continuations[lane] < continuation_capacity) {
                 clear_lane_best_effort(active_sequence(lane), requests[lane]);
