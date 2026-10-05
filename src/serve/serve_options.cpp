@@ -79,7 +79,7 @@ std::string serve_usage_text(const char* argv0) {
            "[--media-preprocess-threads N] "
            "[--device-state-slots N] [--host-state-slots N] [--host-kv-mib N] "
            "[--max-private-continuations N] [--max-shared-prefixes N] "
-           "[--max-long-anchors-per-continuation N] "
+           "[--max-long-anchors-per-continuation N] [--turn-anchors N] "
            "[--request-log-jsonl FILE] "
            "[--response-store-max-records N] [--response-store-max-mib N] "
            "[--kv-dtype bf16|int8|fp8|nvfp4|k8v4] [--spec mtp|dflash|dflash2 --draft-tokens N] "
@@ -269,6 +269,9 @@ ServeOptions parse_serve_options(int argc, char** argv) {
                 parse_nonnegative_int(require_value("--max-long-anchors-per-continuation"),
                                       "max-long-anchors-per-continuation"));
             context_capacity_explicit = true;
+        } else if (arg == "--turn-anchors") {
+            options.turn_anchors = static_cast<std::uint32_t>(
+                parse_nonnegative_int(require_value("--turn-anchors"), "turn-anchors"));
         } else if (arg == "--request-log-jsonl") {
             options.request_log_jsonl = require_value("--request-log-jsonl");
             if (options.request_log_jsonl.empty()) {

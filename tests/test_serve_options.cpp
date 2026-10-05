@@ -325,6 +325,12 @@ int main() {
     failures +=
         check(serve_usage_text("ninfer-serve").find("--no-prefix-reuse") != std::string::npos,
               "serve help omits --no-prefix-reuse");
+    failures += check(defaults.turn_anchors == 1, "turn anchors are not one by default");
+    failures += check(parse({"ninfer-serve", "model.ninfer", "--turn-anchors", "0"}).turn_anchors == 0 &&
+                          parse({"ninfer-serve", "model.ninfer", "--turn-anchors", "3"}).turn_anchors == 3,
+                      "--turn-anchors did not reach serving options");
+    failures += check(serve_usage_text("ninfer-serve").find("--turn-anchors") != std::string::npos,
+                      "serve help omits --turn-anchors");
     failures += check(serve_usage_text("ninfer-serve").find("--host-kv-mib") != std::string::npos,
                       "serve help omits context-cache capacities");
     failures += check(serve_usage_text("ninfer-serve").find("device-state=max-concurrency") !=
