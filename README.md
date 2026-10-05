@@ -11,6 +11,17 @@
 >   contributed by @glfenix) is an option, not the default: on two RTX 5070 Ti it frees about 2 GiB per
 >   board at a 262k context with perplexity and GSM8K unchanged, but costs +4…8 % per decode round
 >   with MTP3 and +4…17 % with DFlash2 between 55k and 210k prompt tokens; keep `int8` where it fits.
+> - **Since v0.4.4 (2026-10-05):** a cancelled or edited turn keeps the conversation cache
+>   (`--turn-anchors`, default on: a 34k-token follow-up after a cancellation resumes in 0.09 s
+>   instead of 6.8 s); `--embedding-host` keeps the token embedding table in mapped pinned host
+>   memory and frees 1.18 GiB per board with bit-identical results (prefill −0.5…0.9 %, decode
+>   unchanged: the DFlash2 profile reaches 262,144 context on 16 GB boards, and at `--tp 1` the
+>   27B fits one board for text); Anthropic `thinking.display: omitted` is accepted (Claude Code
+>   2.1.289 sends it); an artifact converted with the DFlash2 drafter MLP gate/up as NVFP4
+>   (`_dflash2_nvfp4_gate_up` in its recipe) decodes +1.5…2.4 % faster at C=1; the request log
+>   labels callers through `X-Ninfer-Client`, counts thinking tokens without a budget, records GPU
+>   clocks and power, and `--log-speculation-detail` (off by default) adds the per-round accepted
+>   draft lengths and the output/prompt 4-gram overlap. See [serving](docs/serving.md).
 > - **Verified on:** two RTX 5070 Ti 16 GB without peer access, Linux, CUDA 13.1, core clocks
 >   capped at about 2.1 GHz. Other GPUs and P2P-capable pairs are untested.
 > - **Measured** with upstream's own benchmark suite against the published RTX 5090 runs, same
