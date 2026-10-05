@@ -12,9 +12,15 @@ namespace {
 // every row and K tile below divides 5120, 3072 and 8704.
 constexpr bool output_family(int k) { return k == 6144 || k == 3072; }
 
-// This Op admits dense, even-width BF16 residuals. Adjacent MMA rows share one load; each element
-// keeps the single rounding of LinearResidualAddEpilogue::apply_scaled.
+// This Op admits dense, even-width BF16 residuals. Adjacent MMA rows share one load. The scaled
+// update is one FMA in every tile: the full 1024-token prefill chunks already contracted it (the
+// FullTokens instance and the split-K reduce), only tail tiles rounded the sum separately.
 struct Fp8ResidualAddEpilogue : LinearResidualAddEpilogue {
+    __device__ __forceinline__ float apply_scaled(int row, int token, float value,
+                                                  float scale) const {
+        return __fmaf_rn(value, scale, residual.load(row, token));
+    }
+
     __device__ __forceinline__ float2 apply_row_pair_scaled(int row, int token, float2 value,
                                                             float2 scale) const {
         const auto* pointer =
@@ -51,8 +57,7 @@ void launch_problem(const Tensor& x, const Weight& weight, Tensor& residual,
         if constexpr (S::kTmaSwizzle)
             launch_fp8_a8_tma_mma<S>(operands, output, epilogue, stream, workspace.partials);
         else
-            launch_fp8_a8_mma<S>(operands, output, LinearResidualAddEpilogue{{data, weight.n}},
-                                   stream);
+            launch_fp8_a8_mma<S>(operands, output, epilogue, stream);
     };
     if constexpr (output_family(K)) {
         if (x.ne[1] <= 64) return launch.template operator()<K6144Tma32x64>();
