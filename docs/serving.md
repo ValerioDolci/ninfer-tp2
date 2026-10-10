@@ -820,6 +820,9 @@ The table lists executable defaults. The startup example selects a long-context 
 | `--max-shared-prefixes N` | Engine-wide shared stable-prefix descriptor capacity | `max(max-concurrency, 4)` |
 | `--max-long-anchors-per-continuation N` | private long-anchor limit per continuation | `2` |
 | `--turn-anchors N` | private long-anchor opportunities at the last N message boundaries before the final message, so a cancelled or edited turn resumes from the end of the previous turn instead of re-prefilling the conversation (`0` disables) | `1` |
+| `--prefill-miss-dump DIR` | diagnostic for prefix-reuse misses: Serve keeps the token contexts of its last 16 requests (prompt plus committed output, cancelled requests included); a request that recomputes at least `--prefill-miss-min-tokens` prompt tokens and shares at least `--prefill-miss-min-match` of its prompt with the closest of them is dumped when the server recomputed that many tokens identical to it, or when that many of its tokens follow the divergence point (the client changed or dropped earlier text). Each dump is a new directory under `DIR` with `new_prompt.txt`, `old_context.txt`, both token-ID lists and `summary.json` (token counts, divergence point with the text on both sides, and the reading); the request also logs a `prefill miss` warning. At most 64 dumps per process. The files contain conversation text verbatim | off |
+| `--prefill-miss-min-tokens N` | threshold of `--prefill-miss-dump` in tokens | `10000` |
+| `--prefill-miss-min-match F` | minimum share of the prompt matching a recent context for `--prefill-miss-dump` (`0..1`) | `0.5` |
 | `--no-thinking` | disable thinking by default | thinking on |
 | `--preserve-thinking` | preserve closed-turn assistant reasoning by default | off |
 | `--cors` | permissive browser CORS headers | off |

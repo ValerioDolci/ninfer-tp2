@@ -22,6 +22,11 @@
 >   labels callers through `X-Ninfer-Client`, counts thinking tokens without a budget, records GPU
 >   clocks and power, and `--log-speculation-detail` (off by default) adds the per-round accepted
 >   draft lengths and the output/prompt 4-gram overlap. See [serving](docs/serving.md).
+> - **Since v0.4.8 (2026-10-10):** artifacts with a q8 output head (e.g. the Swift-1.5
+>   nvfp4full-dflash2 v3 conversion) start at `--tp 2` (#6); `--prefill-miss-dump DIR` (off by
+>   default) writes both contexts and the divergence point when a request re-prefills a large part
+>   of a recent conversation, to tell a client-side rewrite from a server-side miss (#3). See
+>   [serving](docs/serving.md).
 > - **Verified on:** two RTX 5070 Ti 16 GB without peer access, Linux, CUDA 13.1, core clocks
 >   capped at about 2.1 GHz. Other GPUs and P2P-capable pairs are untested.
 > - **Measured** with upstream's own benchmark suite against the published RTX 5090 runs, same

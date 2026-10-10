@@ -56,6 +56,10 @@ ninfer_add_test(ninfer_request_log_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_request_log.cpp"
   LIBRARIES ninfer_serve)
 
+ninfer_add_test(ninfer_prefill_miss_dump_test
+  SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_prefill_miss_dump.cpp"
+  LIBRARIES ninfer_serve)
+
 # Real NVML on the local GPUs; skips without CUDA devices or libnvidia-ml.so.1.
 ninfer_add_test(ninfer_gpu_telemetry_real_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_gpu_telemetry_real.cpp"
